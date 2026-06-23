@@ -20,8 +20,8 @@ from typing import Optional
 
 logger = logging.getLogger("oracle")
 
-OPENCODE_DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1/chat/completions"
-OPENCODE_DEFAULT_MODEL = "deepseek-v4-flash-free"
+OPENCODE_DEFAULT_ENDPOINT = "http://localhost:20128/v1"
+OPENCODE_DEFAULT_MODEL = "oc/deepseek-v4-flash-free"
 
 
 @dataclass

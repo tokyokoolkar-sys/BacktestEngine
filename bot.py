@@ -918,11 +918,28 @@ class DcaBot:
         try:
             import json
             bal = self._available_balance() if not self.dry_run else 0
+
+            # Build basket details for dashboard
+            baskets = []
+            for symbol, basket in self.baskets.items():
+                baskets.append({
+                    "symbol": symbol,
+                    "avg_entry": basket.avg_entry or 0.0,
+                    "current_price": 0.0,
+                    "floating_pnl": 0.0,
+                    "margin": round(basket.total_margin, 2),
+                    "liquidation": 0.0,
+                    "state": basket.state,
+                    "entry_time": basket.entry_time or "",
+                    "dca_levels": [],
+                })
+
             status = {
                 "bot_alive": True,
                 "oracle": self.oracle is not None,
                 "balance": round(bal, 2),
                 "active_baskets": len(self.baskets),
+                "baskets": baskets,
                 "symbols": [{"name": s.name, "tp_pct": s.tp_pct} for s in self.cfg.active_symbols()],
             }
             with open(str(_HERE / "bot_status.json"), "w") as f:
@@ -1000,12 +1017,18 @@ class DcaBot:
         """
         _POSITION_EPSILON = 1e-6
 
-        for scfg in self.cfg.active_symbols():
+        symbols = self.cfg.active_symbols()
+        logger.info("RECONCILE: scanning %d active symbol(s) for live positions...", len(symbols))
+        before = len(self.baskets)
+        for scfg in symbols:
             symbol = scfg.name
             try:
                 self._reconcile_symbol(symbol, scfg, _POSITION_EPSILON)
             except Exception as e:
                 logger.error("RECONCILE: %s unexpected error, skipping: %s", symbol, e)
+        adopted = len(self.baskets) - before
+        logger.info("RECONCILE: done — %d position(s) adopted, %d symbol(s) flat.",
+                    adopted, len(symbols) - adopted)
 
     def _reconcile_symbol(self, symbol: str, scfg: SymbolConfig, epsilon: float):
         """Reconcile one symbol.  Called by reconcile_on_start(); isolated for per-symbol try/except."""
@@ -1171,6 +1194,8 @@ class DcaBot:
             while True:
                 self.run_once()
                 self._write_status_json()
+                logger.info("cycle done — %d active basket(s); next check in %ds.",
+                            len(self.baskets), self.g.poll_interval_sec)
                 time.sleep(self.g.poll_interval_sec)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
