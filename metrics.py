@@ -73,7 +73,7 @@ def scorecard(result: Result) -> dict:
     equity_values = [eq for _, eq in result.equity_curve]
     max_drawdown = 0.0
     if equity_values:
-        peak = 0.0  # equity starts at 0 (engine assumption 10); DD measured from there
+        peak = equity_values[0]  # track running peak, starting at first equity value
         for eq in equity_values:
             if eq > peak:
                 peak = eq
@@ -134,7 +134,7 @@ def format_scorecard(named: list[tuple[str, dict]]) -> str:
         ("Trades",            "n_trades",          count),
         ("Win rate",          "win_rate",           pct),
         ("Avg win",           "avg_win",            usd),
-        ("Avg loss",          "avg_loss",           lambda v: f"{v:.4f}"),
+        ("Avg loss",          "avg_loss",           usd),
         ("Payoff ratio",      "payoff_ratio",       ratio),
         ("Net PnL",           "net_pnl",            usd),
         ("Expectancy/trade",  "expectancy",         usd),

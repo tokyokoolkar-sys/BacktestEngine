@@ -137,10 +137,14 @@ class CheckpointStrategy:
 
         if cfg.checkpoint_mode == "first_green":
             if is_green:
-                # Checkpoint: exit on first green close
-                self._state = self._ARMED
+                # Checkpoint: exit on first green close; route through FLAT_LOCKED
+                # so the green_gate applies before re-arming (same as forced-exit path).
                 self._green_count = 0
                 self._saw_red = False
+                if cfg.green_gate == "off":
+                    self._state = self._ARMED
+                else:
+                    self._state = self._LOCKED
                 return "exit_checkpoint"
             # Red -> hold; stop/liq/TP handled by engine
             return "hold"

@@ -4,3 +4,7 @@ cache/
 *.parquet
 *.zip
 .venv/
+
+# runtime state (live bot)
+bot_status.json
+bot_trade_log.csv

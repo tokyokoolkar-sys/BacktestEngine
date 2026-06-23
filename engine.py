@@ -323,9 +323,9 @@ def run_backtest(
                         else:
                             liq_price = avg_entry * (1.0 - 1.0 / ecfg.leverage + ecfg.maint_margin_rate)
 
-                        # TP price updates with new avg_entry
+                        # TP price updates with new avg_entry (direction-aware)
                         if scfg.position_model == "dca":
-                            tp_price = avg_entry * (1.0 + dcfg.take_profit_pct / 100.0)
+                            tp_price = avg_entry * (1.0 - dcfg.take_profit_pct / 100.0) if _short else avg_entry * (1.0 + dcfg.take_profit_pct / 100.0)
                     else:
                         break  # triggers are in order; no need to check further
 
@@ -361,7 +361,7 @@ def run_backtest(
                     fees=total_fees + exit_fee,
                     funding=fund_paid,
                     net_pnl=net,
-                    pnl_pct=net / ecfg.margin_usdt,
+                    pnl_pct=net / total_margin,
                     exit_reason="liquidation",
                     n_safety_filled=n_safety_filled,
                 )
@@ -384,7 +384,7 @@ def run_backtest(
                     fees=total_fees + exit_fee,
                     funding=fund_paid,
                     net_pnl=net,
-                    pnl_pct=net / ecfg.margin_usdt,
+                    pnl_pct=net / total_margin,
                     exit_reason="stop",
                     n_safety_filled=n_safety_filled,
                 )
@@ -407,7 +407,7 @@ def run_backtest(
                     fees=total_fees + exit_fee,
                     funding=fund_paid,
                     net_pnl=net,
-                    pnl_pct=net / ecfg.margin_usdt,
+                    pnl_pct=net / total_margin,
                     exit_reason="take_profit",
                     n_safety_filled=n_safety_filled,
                 )

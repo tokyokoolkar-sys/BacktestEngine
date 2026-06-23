@@ -244,7 +244,9 @@ def load_klines(path: str | Path) -> pd.DataFrame:
     Sorted by open_time, RangeIndex.
     """
     df = pd.read_parquet(path)
-    df["open_time"] = pd.to_datetime(df["open_time"], utc=True)
+    # parquet preserves tz-aware UTC datetime; ensure ns precision
+    if df["open_time"].dt.tz is not None:
+        df["open_time"] = df["open_time"].astype("datetime64[ns, UTC]")
     df = df.sort_values("open_time").reset_index(drop=True)
     return df
 
@@ -258,6 +260,8 @@ def load_funding(path: str | Path) -> pd.DataFrame:
     Sorted by funding_time, RangeIndex.
     """
     df = pd.read_parquet(path)
-    df["funding_time"] = pd.to_datetime(df["funding_time"], utc=True)
+    # parquet preserves tz-aware UTC datetime; ensure ns precision
+    if df["funding_time"].dt.tz is not None:
+        df["funding_time"] = df["funding_time"].astype("datetime64[ns, UTC]")
     df = df.sort_values("funding_time").reset_index(drop=True)
     return df
