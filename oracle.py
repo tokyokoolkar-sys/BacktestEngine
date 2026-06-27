@@ -20,8 +20,8 @@ from typing import Optional
 
 logger = logging.getLogger("oracle")
 
-OPENCODE_DEFAULT_ENDPOINT = "http://localhost:20128/v1"
-OPENCODE_DEFAULT_MODEL = "oc/deepseek-v4-flash-free"
+OPENCODE_DEFAULT_ENDPOINT = "https://ai.genfity.com/v1"
+OPENCODE_DEFAULT_MODEL = "genfity/deepseek-v4-pro"
 
 
 @dataclass

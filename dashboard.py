@@ -23,12 +23,25 @@ from pathlib import Path
 from threading import Lock, Thread
 
 try:
-    from flask import Flask, jsonify, redirect, render_template_string, url_for
+    from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+    from functools import wraps
 except ImportError:
     print("Install flask: pip install flask")
     sys.exit(1)
 
 _HERE = Path(__file__).parent
+
+# Load .env so the dashboard AND the bot.py/trade.py subprocesses it launches
+# inherit real Binance credentials / control token without the parent shell
+# having exported them. Children also load .env independently on their own.
+# override=True: .env is canonical — a stale/wrong-type key in the parent shell
+# (e.g. an Ed25519 key) must not override the correct HMAC key in .env.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_HERE / ".env", override=True)
+except ImportError:
+    pass
+
 logger = logging.getLogger("dashboard")
 app = Flask(__name__)
 _cache = {}
@@ -538,6 +551,69 @@ body {
   .hv-meta { gap: 12px; }
   .live-chip { font-size: 0.62rem; }
 }
+
+/* ── HAMBURGER NAV ── */
+.hb-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.hb-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.hb-btn:hover,
+.hb-btn:focus-visible { color: var(--ink-primary); border-color: var(--bg-border); outline: none; }
+.hb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hb-dropdown {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-border);
+  border-radius: 8px;
+  padding: 4px;
+  min-width: 160px;
+  z-index: 9999;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hb-dropdown { transition: none; }
+}
+.hb-dropdown.hb-open {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.hb-item {
+  display: block;
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-secondary);
+  text-decoration: none;
+  border-radius: 5px;
+  transition: background 0.12s, color 0.12s;
+}
+.hb-item:hover,
+.hb-item:focus-visible { background: var(--bg-border); color: var(--ink-primary); outline: none; }
+.hb-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.hb-active { color: var(--accent) !important; }
 </style>
 </head>
 <body>
@@ -550,7 +626,20 @@ body {
     <span class="nav-chip-dot"></span>
     <span id="nav-status-text">LIVE</span>
   </div>
-  <a href="/dashboard" class="nav-link">→ PANEL</a>
+  <div class="hb-wrap">
+    <button class="hb-btn" id="hb-btn" aria-label="Menu" aria-expanded="false" aria-haspopup="true">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <rect x="2" y="5"  width="16" height="2" rx="1" fill="currentColor"/>
+        <rect x="2" y="9"  width="16" height="2" rx="1" fill="currentColor"/>
+        <rect x="2" y="13" width="16" height="2" rx="1" fill="currentColor"/>
+      </svg>
+    </button>
+    <div class="hb-dropdown" id="hb-dropdown" role="menu">
+      <a href="/"          class="hb-item hb-active" role="menuitem">Home</a>
+      <a href="/dashboard" class="hb-item"            role="menuitem">Dashboard</a>
+      <a href="/manual"    class="hb-item"            role="menuitem">Manual</a>
+    </div>
+  </div>
 </nav>
 
 <!-- ── HERO ── -->
@@ -972,6 +1061,21 @@ window.addEventListener('resize', () => {
     _lastData.trades_chrono || []
   );
 });
+
+// ── HAMBURGER NAV ──
+(function() {
+  const btn = document.getElementById('hb-btn');
+  const dd  = document.getElementById('hb-dropdown');
+  if (!btn || !dd) return;
+  function open()  { dd.classList.add('hb-open');    btn.setAttribute('aria-expanded','true'); }
+  function close(refocus) { dd.classList.remove('hb-open'); btn.setAttribute('aria-expanded','false'); if (refocus) btn.focus(); }
+  function toggle() { dd.classList.contains('hb-open') ? close(true) : open(); }
+  btn.addEventListener('click', function(e) { e.stopPropagation(); toggle(); });
+  document.addEventListener('click', function(e) {
+    if (dd.classList.contains('hb-open') && !dd.contains(e.target) && e.target !== btn) close(false);
+  });
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape' && dd.classList.contains('hb-open')) close(true); });
+})();
 </script>
 </body>
 </html>"""
@@ -991,9 +1095,10 @@ HTML = r"""<!DOCTYPE html>
 <style>
 /* ── Z-INDEX SCALE ── */
 :root {
-  --z-base:    0;
-  --z-overlay: 10;
-  --z-nav:     20;
+  --z-base:     0;
+  --z-overlay:  10;
+  --z-nav:      20;
+  --z-dropdown: 200;
 }
 
 /* ── OKLCH COLOR TOKENS ── */
@@ -1102,6 +1207,95 @@ body {
   flex-shrink: 0;
 }
 .topbar-back:hover { color: var(--accent); }
+
+/* ── BOT START/STOP CONTROL (topbar) ── */
+.topbar-botctl {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 12px; margin: 0 4px; height: 100%;
+  border-left: 1px solid var(--bg-border);
+  border-right: 1px solid var(--bg-border);
+  flex-shrink: 0;
+}
+.botctl-status {
+  font-family: var(--font-mono); font-size: 0.58rem;
+  letter-spacing: 0.06em; color: var(--ink-muted);
+  white-space: nowrap;
+}
+.botctl-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  min-width: 36px; min-height: 28px; padding: 0 8px;
+  font-family: var(--font-mono); font-size: 0.56rem; font-weight: 600;
+  letter-spacing: 0.06em; border-radius: 4px; border: 1px solid;
+  cursor: pointer; transition: opacity 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+.botctl-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.botctl-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.botctl-start {
+  background: rgba(0,200,80,0.12);
+  border-color: var(--profit);
+  color: var(--profit);
+}
+.botctl-start:not(:disabled):hover { background: rgba(0,200,80,0.22); }
+.botctl-stop {
+  background: rgba(230,60,60,0.12);
+  border-color: var(--loss);
+  color: var(--loss);
+}
+.botctl-stop:not(:disabled):hover { background: rgba(230,60,60,0.22); }
+.botctl-msg {
+  font-family: var(--font-mono); font-size: 0.6rem;
+  color: var(--loss); max-width: 120px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.botctl-spinner {
+  width: 16px; height: 16px; color: var(--ink-muted); flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .botctl-spinner circle { animation: none; stroke-dasharray: 56 0; }
+}
+
+/* ── HAMBURGER NAV (dashboard) ── */
+.hb-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.hb-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--ink-muted); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.hb-btn:hover { color: var(--ink-primary); border-color: var(--bg-border); }
+.hb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; color: var(--ink-primary); border-color: var(--bg-border); }
+.hb-dropdown {
+  position: fixed; top: 56px; right: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-border);
+  border-radius: 8px; padding: 4px; min-width: 160px;
+  z-index: var(--z-dropdown);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+  opacity: 0; transform: translateY(-6px);
+  pointer-events: none;
+  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hb-dropdown { transition: none; }
+}
+.hb-dropdown.hb-open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.hb-item {
+  display: block; padding: 10px 14px;
+  font-family: var(--font-mono); font-size: 0.72rem;
+  letter-spacing: 0.04em; color: var(--ink-secondary);
+  text-decoration: none; border-radius: 5px;
+  transition: background 0.12s, color 0.12s;
+}
+.hb-item:hover { background: var(--bg-border); color: var(--ink-primary); }
+.hb-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-border); color: var(--ink-primary); }
+.hb-active { color: var(--accent) !important; }
 
 /* ── EQUITY STRIP ── */
 .equity-section {
@@ -1291,27 +1485,47 @@ tr:hover td { background: var(--bg-raised); }
   <a href="/" class="topbar-brand">DCA<span>//</span>ENGINE</a>
   <div class="topbar-items">
     <div class="topbar-item">
-      <span class="topbar-dot" id="bot-dot"></span>
-      <span class="topbar-item-label">BOT</span>
-      <span class="topbar-item-value" id="bot-status">—</span>
-    </div>
-    <div class="topbar-item">
-      <span class="topbar-dot dot-amber" id="oracle-dot"></span>
-      <span class="topbar-item-label">ORACLE</span>
-      <span class="topbar-item-value" id="oracle-status">—</span>
-    </div>
-    <div class="topbar-item">
       <span class="topbar-item-label">BALANCE</span>
       <span class="topbar-item-value" id="balance">—</span>
       <span class="topbar-item-label">USDT</span>
     </div>
     <div class="topbar-spacer"></div>
   </div>
+  <div class="topbar-botctl" id="topbar-botctl">
+    <span class="botctl-status" id="botctl-status-text">—</span>
+    <button class="botctl-btn botctl-start" id="botctl-start" aria-label="Start auto bot">
+      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><polygon points="2,1 11,6 2,11" fill="currentColor"/></svg>
+      START
+    </button>
+    <button class="botctl-btn botctl-stop" id="botctl-stop" style="display:none" aria-label="Stop auto bot">
+      <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true"><rect x="2" y="2" width="8" height="8" rx="1" fill="currentColor"/></svg>
+      STOP
+    </button>
+    <span class="botctl-msg" id="botctl-msg"></span>
+    <svg class="botctl-spinner" id="botctl-spinner" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="display:none">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" stroke-dasharray="28 56" stroke-linecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite"/>
+      </circle>
+    </svg>
+  </div>
   <div class="topbar-streak">
     <span class="streak-num" id="streak-num">0</span>
     <span class="streak-label" id="streak-label">streak</span>
   </div>
-  <a href="/" class="topbar-back">← HOME</a>
+  <div class="hb-wrap">
+    <button class="hb-btn" id="hb-btn" aria-label="Menu" aria-expanded="false" aria-haspopup="true">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <rect x="2" y="5"  width="16" height="2" rx="1" fill="currentColor"/>
+        <rect x="2" y="9"  width="16" height="2" rx="1" fill="currentColor"/>
+        <rect x="2" y="13" width="16" height="2" rx="1" fill="currentColor"/>
+      </svg>
+    </button>
+    <div class="hb-dropdown" id="hb-dropdown" role="menu">
+      <a href="/"          class="hb-item"            role="menuitem">Home</a>
+      <a href="/dashboard" class="hb-item hb-active"  role="menuitem">Dashboard</a>
+      <a href="/manual"    class="hb-item"            role="menuitem">Manual</a>
+    </div>
+  </div>
 </header>
 
 <!-- ── EQUITY STRIP ── -->
@@ -1508,14 +1722,7 @@ async function refresh() {
     const d = await r.json();
     lastData = d;
 
-    // Topbar
-    const alive = d.bot_alive;
-    const botDot = document.getElementById('bot-dot');
-    botDot.className = 'topbar-dot ' + (alive ? 'dot-live' : 'dot-off');
-    document.getElementById('bot-status').textContent = alive ? 'RUNNING' : 'STOPPED';
-    const oracleDot = document.getElementById('oracle-dot');
-    oracleDot.className = 'topbar-dot ' + (d.oracle_enabled ? 'dot-amber' : 'dot-off');
-    document.getElementById('oracle-status').textContent = d.oracle_enabled ? 'ACTIVE' : 'OFF';
+    // Topbar balance
     document.getElementById('balance').textContent = (d.balance || 0).toFixed(2);
 
     // Streak
@@ -1611,6 +1818,7 @@ async function refresh() {
     } else {
       bb.innerHTML = '<tr><td colspan="8"><div class="empty-state">NO ACTIVE POSITIONS</div></td></tr>';
     }
+
   } catch(e) { console.error('refresh error', e); }
 }
 
@@ -1619,6 +1827,1010 @@ setInterval(refresh, 5000);
 window.addEventListener('resize', () => {
   if (lastData) drawChart(document.getElementById('equity-canvas'), lastData.trades_chrono || []);
 });
+
+// ──────────────────────────────────────────────────────────
+// CONTROL HELPERS — tokenless fetch
+// ──────────────────────────────────────────────────────────
+
+// Helper: POST to control endpoint (no auth token required — localhost only)
+async function control(path, body) {
+  try {
+    const resp = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : null,
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      let msg = text || `${resp.status} error`;
+      if (resp.status === 409) msg = text || 'Conflict — action not allowed in current state';
+      console.warn('control error:', msg);
+      return null;
+    }
+    return await resp.json();
+  } catch (e) {
+    console.warn('control network error:', e.message || e);
+    return null;
+  }
+}
+
+// Refresh control state
+async function refreshControlState() {
+  try {
+    const r = await fetch('/api/control/state');
+    if (!r.ok) return;
+    const state = await r.json();
+    // Pass state to topbar botctl handler
+    if (typeof window._applyBotState === 'function') window._applyBotState(state.auto_running || false);
+  } catch (e) {
+    console.warn('control state fetch error', e);
+  }
+}
+
+refreshControlState();
+setInterval(refreshControlState, 3000);
+
+// ── HAMBURGER NAV ──
+(function() {
+  const btn = document.getElementById('hb-btn');
+  const dd  = document.getElementById('hb-dropdown');
+  if (!btn || !dd) return;
+  function hbOpen()  { dd.classList.add('hb-open');    btn.setAttribute('aria-expanded','true'); }
+  function hbClose(refocus) { dd.classList.remove('hb-open'); btn.setAttribute('aria-expanded','false'); if (refocus) btn.focus(); }
+  btn.addEventListener('click', function(e) { e.stopPropagation(); dd.classList.contains('hb-open') ? hbClose(true) : hbOpen(); });
+  document.addEventListener('click', function(e) { if (dd.classList.contains('hb-open') && !dd.contains(e.target) && e.target !== btn) hbClose(false); });
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape' && dd.classList.contains('hb-open')) hbClose(true); });
+})();
+
+// ── TOPBAR BOT START/STOP ──
+(function() {
+  const startBtn  = document.getElementById('botctl-start');
+  const stopBtn   = document.getElementById('botctl-stop');
+  const statusTxt = document.getElementById('botctl-status-text');
+  const msgEl     = document.getElementById('botctl-msg');
+  const spinner   = document.getElementById('botctl-spinner');
+
+  function setBotCtlBusy(busy) {
+    if (startBtn)  startBtn.disabled  = busy;
+    if (stopBtn)   stopBtn.disabled   = busy;
+    if (spinner)   spinner.style.display = busy ? 'block' : 'none';
+  }
+
+  function showBotCtlMsg(txt, isErr) {
+    if (!msgEl) return;
+    msgEl.textContent = txt;
+    msgEl.style.color = isErr ? 'var(--loss)' : 'var(--profit)';
+    setTimeout(() => { msgEl.textContent = ''; }, 4000);
+  }
+
+  function applyBotState(auto_running) {
+    if (!startBtn || !stopBtn || !statusTxt) return;
+    if (auto_running) {
+      statusTxt.textContent = 'BOT LIVE';
+      statusTxt.style.color = 'var(--profit)';
+      startBtn.style.display = 'none';
+      stopBtn.style.display  = '';
+    } else {
+      statusTxt.textContent = 'BOT INACTIVE';
+      statusTxt.style.color = 'var(--ink-ghost)';
+      startBtn.style.display = '';
+      stopBtn.style.display  = 'none';
+    }
+  }
+
+  async function pollUntilFlip(wantRunning, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 1000));
+      try {
+        const r = await fetch('/api/control/state');
+        if (!r.ok) continue;
+        const s = await r.json();
+        if (!!s.auto_running === wantRunning) {
+          applyBotState(s.auto_running);
+          return true;
+        }
+      } catch(e) { /* retry */ }
+    }
+    return false;
+  }
+
+  if (startBtn) startBtn.addEventListener('click', async function() {
+    setBotCtlBusy(true);
+    const res = await control('/api/control/auto/start', null);
+    if (!res) { setBotCtlBusy(false); return; }
+    const ok = await pollUntilFlip(true, 20000);
+    setBotCtlBusy(false);
+    if (!ok) showBotCtlMsg('Timeout waiting for start', true);
+  });
+
+  if (stopBtn) stopBtn.addEventListener('click', async function() {
+    setBotCtlBusy(true);
+    const res = await control('/api/control/auto/stop', null);
+    if (!res) { setBotCtlBusy(false); return; }
+    const ok = await pollUntilFlip(false, 20000);
+    setBotCtlBusy(false);
+    if (!ok) showBotCtlMsg('Timeout waiting for stop', true);
+  });
+
+  // Export applyBotState so refreshControlState can call it
+  window._applyBotState = applyBotState;
+})();
+</script>
+</body>
+</html>"""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CONTROL PLANE — token auth, supervisor helpers, and control routes.
+#
+# Control routes are open (no token required) — dashboard is localhost-only.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
+# Auth decorator
+# ---------------------------------------------------------------------------
+
+def require_token(f):
+    """Auth dropped — dashboard is localhost-only; all control routes are open."""
+    @wraps(f)
+    def _inner(*args, **kwargs):
+        return f(*args, **kwargs)
+    return _inner
+
+
+# ---------------------------------------------------------------------------
+# PID / process helpers
+# ---------------------------------------------------------------------------
+
+def _pid_alive_dash(pid: int) -> bool:
+    """Return True if process *pid* is alive (dashboard-local copy, no bot import)."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if handle == 0:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _proc_running(pidfile: Path) -> bool:
+    """Return True if the pidfile exists and the recorded pid is alive."""
+    try:
+        if not pidfile.exists():
+            return False
+        pid = int(pidfile.read_text().strip())
+        return _pid_alive_dash(pid)
+    except Exception:
+        return False
+
+
+def _stop_proc(pidfile: Path, label: str):
+    """Terminate the process recorded in *pidfile*.  Noop if already stopped."""
+    try:
+        if not pidfile.exists():
+            return
+        pid = int(pidfile.read_text().strip())
+        if not _pid_alive_dash(pid):
+            pidfile.unlink(missing_ok=True)
+            return
+        if sys.platform == "win32":
+            import ctypes
+            PROCESS_TERMINATE = 0x0001
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+            if handle:
+                ctypes.windll.kernel32.TerminateProcess(handle, 0)
+                ctypes.windll.kernel32.CloseHandle(handle)
+        else:
+            import signal as _signal
+            os.kill(pid, _signal.SIGTERM)
+        logger.info("Sent stop signal to %s (pid=%d)", label, pid)
+    except Exception as e:
+        logger.warning("stop_proc %s: %s", label, e)
+
+
+def _start_auto():
+    """Launch bot.py --loop in a detached subprocess."""
+    subprocess.Popen(
+        [sys.executable, str(_HERE / "bot.py"), "--loop"],
+        cwd=str(_HERE),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _start_manual():
+    """Launch trade.py --loop in a detached subprocess."""
+    subprocess.Popen(
+        [sys.executable, str(_HERE / "trade.py"), "--loop"],
+        cwd=str(_HERE),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Control routes
+# ---------------------------------------------------------------------------
+
+_BOT_PID   = _HERE / "bot.pid"
+_TRADE_PID = _HERE / "trade.pid"
+_BOT_CONTROL_PATH    = _HERE / "bot_control.json"
+_MANUAL_CONTROL_PATH = _HERE / "manual_control.json"
+
+
+@app.route("/api/control/state")
+def control_state():
+    """GET — no token required (read-only status)."""
+    auto_running   = _proc_running(_BOT_PID)
+    manual_running = _proc_running(_TRADE_PID)
+    if auto_running:
+        mode = "auto"
+    elif manual_running:
+        mode = "manual"
+    else:
+        mode = "idle"
+    return jsonify({
+        "auto_running":   auto_running,
+        "manual_running": manual_running,
+        "mode":           mode,
+    })
+
+
+@app.route("/api/control/auto/start", methods=["POST"])
+@require_token
+def control_auto_start():
+    if _proc_running(_TRADE_PID):
+        return jsonify({"ok": False, "error": "manual engine is running; stop it first"}), 409
+    if _proc_running(_BOT_PID):
+        return jsonify({"ok": True, "note": "already running"})
+    _start_auto()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/control/auto/stop", methods=["POST"])
+@require_token
+def control_auto_stop():
+    _stop_proc(_BOT_PID, "bot.py")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/control/manual/start", methods=["POST"])
+@require_token
+def control_manual_start():
+    if _proc_running(_BOT_PID):
+        return jsonify({"ok": False, "error": "auto engine is running; stop it first"}), 409
+    if _proc_running(_TRADE_PID):
+        return jsonify({"ok": True, "note": "already running"})
+    _start_manual()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/control/manual/stop", methods=["POST"])
+@require_token
+def control_manual_stop():
+    _stop_proc(_TRADE_PID, "trade.py")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/control/manual/enter", methods=["POST"])
+@require_token
+def control_manual_enter():
+    """Write a manual enter request to manual_control.json."""
+    if not _proc_running(_TRADE_PID):
+        return jsonify({"ok": False, "error": "manual engine is not running"}), 409
+    body = request.get_json(silent=True) or {}
+    symbol = str(body.get("symbol", "")).strip().upper()
+    signal = str(body.get("signal", "")).strip()
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol is required"}), 400
+    if signal != "go":
+        return jsonify({"ok": False, "error": "signal must be 'go'"}), 400
+    try:
+        with open(_MANUAL_CONTROL_PATH, "w") as f:
+            json.dump({"enter": {"symbol": symbol, "signal": "go"}}, f)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "symbol": symbol})
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MANUAL TRADING PAGE
+# ──────────────────────────────────────────────────────────────────────────────
+MANUAL_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DCA Engine — Manual Trading</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Z-INDEX SCALE ── */
+:root {
+  --z-nav: 100;
+  --z-dropdown: 9999;
+}
+/* ── TOKENS (mirror dashboard) ── */
+:root {
+  --bg-base:    #0d0f12;
+  --bg-surface: #131619;
+  --bg-border:  #1e2228;
+  --ink-primary:#e8eaf0;
+  --ink-muted:  #8a90a0;
+  --ink-ghost:  #484f5e;
+  --accent:     #5b7fff;
+  --profit:     #00c850;
+  --loss:       #e63c3c;
+  --amber:      #f5a623;
+  --font-mono:  'JetBrains Mono', 'Menlo', monospace;
+  --font-sans:  'Manrope', 'Inter', sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { background: var(--bg-base); color: var(--ink-primary); font-family: var(--font-sans); font-size: 14px; }
+body { min-height: 100vh; background: var(--bg-base); }
+
+/* ── TOPBAR ── */
+.topbar {
+  position: sticky; top: 0; z-index: var(--z-nav);
+  display: flex; align-items: center; gap: 0;
+  height: 48px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--bg-border);
+}
+.topbar-brand {
+  display: flex; align-items: center;
+  padding: 0 20px; height: 100%;
+  border-right: 1px solid var(--bg-border);
+  font-family: var(--font-mono);
+  font-size: 0.72rem; font-weight: 600;
+  color: var(--ink-primary); text-decoration: none;
+  letter-spacing: 0.04em; flex-shrink: 0;
+}
+.topbar-brand span { color: var(--accent); }
+.topbar-title {
+  padding: 0 18px; height: 100%;
+  display: flex; align-items: center;
+  font-family: var(--font-mono); font-size: 0.68rem;
+  letter-spacing: 0.06em; color: var(--ink-ghost);
+  border-right: 1px solid var(--bg-border);
+}
+.topbar-spacer { flex: 1; }
+
+/* ── HAMBURGER NAV ── */
+.hb-wrap { position: relative; display: flex; align-items: center; }
+.hb-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  color: var(--ink-muted); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s; flex-shrink: 0;
+}
+.hb-btn:hover { color: var(--ink-primary); border-color: var(--bg-border); }
+.hb-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; color: var(--ink-primary); border-color: var(--bg-border); }
+.hb-dropdown {
+  position: fixed; top: 56px; right: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-border);
+  border-radius: 8px; padding: 4px; min-width: 160px;
+  z-index: var(--z-dropdown);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+  opacity: 0; transform: translateY(-6px); pointer-events: none;
+  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+}
+@media (prefers-reduced-motion: reduce) { .hb-dropdown { transition: none; } }
+.hb-dropdown.hb-open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.hb-item {
+  display: block; padding: 10px 14px;
+  font-family: var(--font-mono); font-size: 0.72rem;
+  letter-spacing: 0.04em; color: var(--ink-primary);
+  text-decoration: none; border-radius: 5px;
+  transition: background 0.12s, color 0.12s;
+}
+.hb-item:hover { background: var(--bg-border); color: var(--ink-primary); }
+.hb-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--bg-border); color: var(--ink-primary); }
+.hb-active { color: var(--accent) !important; }
+
+/* ── LAYOUT ── */
+.manual-layout {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 0;
+  height: calc(100vh - 48px);
+}
+.manual-sidebar {
+  background: var(--bg-surface);
+  border-right: 1px solid var(--bg-border);
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 0;
+}
+.manual-chart-area {
+  display: flex; flex-direction: column;
+  background: var(--bg-base);
+  min-height: 0;
+}
+
+/* ── PANEL SECTIONS ── */
+.panel-section {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--bg-border);
+}
+.panel-section-title {
+  font-family: var(--font-mono);
+  font-size: 0.6rem; font-weight: 600;
+  letter-spacing: 0.1em; color: var(--ink-muted);
+  text-transform: uppercase; margin-bottom: 14px;
+}
+
+/* ── STATE BADGE ── */
+.state-row {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 14px;
+}
+.state-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--ink-ghost);
+}
+.state-dot.dot-active { background: var(--profit); box-shadow: 0 0 6px var(--profit); }
+.state-dot.dot-manual { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.state-label {
+  font-family: var(--font-mono); font-size: 0.68rem;
+  font-weight: 600; letter-spacing: 0.06em; color: var(--ink-primary);
+}
+
+
+/* ── CONTROL BUTTONS ── */
+.ctrl-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.ctrl-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 0 16px;
+  font-family: var(--font-mono); font-size: 0.66rem;
+  font-weight: 600; letter-spacing: 0.06em;
+  border-radius: 6px; border: 1px solid; cursor: pointer;
+  transition: opacity 0.15s, background 0.15s; flex: 1;
+  justify-content: center;
+}
+.ctrl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ctrl-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn-start-manual {
+  background: rgba(91,127,255,0.12); border-color: var(--accent); color: var(--accent);
+}
+.btn-start-manual:not(:disabled):hover { background: rgba(91,127,255,0.22); }
+.btn-stop-manual {
+  background: rgba(230,60,60,0.12); border-color: var(--loss); color: var(--loss);
+}
+.btn-stop-manual:not(:disabled):hover { background: rgba(230,60,60,0.22); }
+
+/* ── SYMBOL SEARCH DROPDOWN ── */
+.sym-picker { position: relative; width: 100%; }
+.sym-search-input {
+  background: var(--bg-base); border: 1px solid var(--bg-border);
+  border-radius: 5px; padding: 9px 32px 9px 10px;
+  font-family: var(--font-mono); font-size: 0.72rem;
+  color: var(--ink-primary); outline: none; width: 100%;
+  transition: border-color 0.14s; cursor: pointer;
+}
+.sym-search-input::placeholder { color: var(--ink-muted); opacity: 1; }
+.sym-search-input:focus { border-color: var(--accent); }
+.sym-search-chevron {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; color: var(--ink-ghost);
+}
+.sym-dropdown {
+  position: fixed;
+  background: var(--bg-surface);
+  border: 1px solid var(--bg-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  z-index: var(--z-dropdown);
+  overflow: hidden;
+  display: none;
+}
+.sym-dropdown.open { display: block; }
+.sym-dropdown-list {
+  list-style: none;
+  max-height: 280px; overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sym-dropdown-list li {
+  padding: 0 14px;
+  font-family: var(--font-mono); font-size: 0.7rem;
+  color: var(--ink-primary); cursor: pointer;
+  min-height: 44px; display: flex; align-items: center;
+  transition: background 0.1s;
+}
+.sym-dropdown-list li:hover { background: var(--bg-border); }
+.sym-dropdown-list li:focus { background: var(--bg-border); outline: none; }
+.sym-dropdown-list li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sym-dropdown-list li.sym-active { color: var(--accent); background: rgba(91,127,255,0.08); }
+.sym-dropdown-list li.sym-kbd-focus { background: var(--bg-border); }
+.sym-dropdown-empty {
+  padding: 12px 14px;
+  font-family: var(--font-mono); font-size: 0.68rem;
+  color: var(--ink-ghost);
+}
+.sym-selected-display {
+  font-family: var(--font-mono); font-size: 0.68rem;
+  color: var(--ink-muted); margin-top: 8px; min-height: 18px;
+}
+.sym-selected-display strong { color: var(--accent); }
+
+/* ── GO BUTTON ── */
+.go-btn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; min-height: 48px; margin-top: 4px;
+  font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700;
+  letter-spacing: 0.08em;
+  background: rgba(0,200,80,0.14); border: 1px solid var(--profit);
+  color: var(--profit); border-radius: 7px; cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.go-btn:not(:disabled):hover { background: rgba(0,200,80,0.26); }
+.go-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.go-btn:focus-visible { outline: 2px solid var(--profit); outline-offset: 2px; }
+.go-spinner {
+  width: 16px; height: 16px; color: var(--profit);
+  display: none; flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) { .go-spinner circle { animation: none; stroke-dasharray: 56 0; } }
+
+/* ── STATUS MSG ── */
+.status-msg {
+  font-family: var(--font-mono); font-size: 0.62rem;
+  min-height: 18px; margin-top: 8px;
+  color: var(--ink-ghost);
+}
+
+/* ── CHART AREA ── */
+.chart-wrap {
+  flex: 1; min-height: 0;
+  position: relative;
+}
+#tv-chart-container {
+  position: absolute; inset: 0;
+}
+.chart-fallback {
+  display: none;
+  flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px;
+  position: absolute; inset: 0;
+  font-family: var(--font-mono); font-size: 0.72rem;
+  color: var(--ink-ghost); text-align: center;
+}
+.chart-fallback a { color: var(--accent); }
+.chart-label {
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--bg-border);
+  font-family: var(--font-mono); font-size: 0.6rem;
+  letter-spacing: 0.08em; color: var(--ink-ghost);
+  display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0;
+}
+.chart-sym { color: var(--ink-primary); font-weight: 600; font-size: 0.72rem; }
+
+/* ── RESPONSIVE ── */
+@media (max-width: 800px) {
+  .manual-layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: auto; }
+  .manual-chart-area { min-height: 360px; }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <a href="/" class="topbar-brand">DCA<span>//</span>ENGINE</a>
+  <div class="topbar-title">MANUAL TRADING</div>
+  <div class="topbar-spacer"></div>
+  <div class="hb-wrap">
+    <button class="hb-btn" id="hb-btn" aria-label="Menu" aria-expanded="false" aria-haspopup="true">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
+        <rect x="2" y="5"  width="16" height="2" rx="1" fill="currentColor"/>
+        <rect x="2" y="9"  width="16" height="2" rx="1" fill="currentColor"/>
+        <rect x="2" y="13" width="16" height="2" rx="1" fill="currentColor"/>
+      </svg>
+    </button>
+    <div class="hb-dropdown" id="hb-dropdown" role="menu">
+      <a href="/"          class="hb-item"            role="menuitem">Home</a>
+      <a href="/dashboard" class="hb-item"            role="menuitem">Dashboard</a>
+      <a href="/manual"    class="hb-item hb-active"  role="menuitem">Manual</a>
+    </div>
+  </div>
+</header>
+
+<div class="manual-layout">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="manual-sidebar">
+
+    <!-- Mode state -->
+    <div class="panel-section">
+      <div class="panel-section-title">Engine State</div>
+      <div class="state-row">
+        <span class="state-dot" id="m-state-dot"></span>
+        <span class="state-label" id="m-state-label">LOADING…</span>
+      </div>
+      <div id="m-auto-warn" style="display:none;font-family:var(--font-mono);font-size:0.6rem;color:var(--amber);margin-bottom:10px;">
+        Auto bot is running — stop it before starting manual.
+      </div>
+      <div class="ctrl-btns">
+        <button class="ctrl-btn btn-start-manual" id="m-start-btn" disabled>
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true"><polygon points="1,0.5 10.5,5.5 1,10.5" fill="currentColor"/></svg>
+          Start Manual
+        </button>
+        <button class="ctrl-btn btn-stop-manual" id="m-stop-btn" disabled>
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true"><rect x="1" y="1" width="9" height="9" rx="1" fill="currentColor"/></svg>
+          Stop Manual
+        </button>
+      </div>
+      <div class="status-msg" id="m-ctrl-msg"></div>
+    </div>
+
+    <!-- Symbol picker -->
+    <div class="panel-section">
+      <div class="panel-section-title">Symbol</div>
+      <div class="sym-picker" id="sym-picker">
+        <input type="text" id="m-sym-search" class="sym-search-input"
+          placeholder="Search or select symbol…"
+          autocomplete="off" aria-label="Search symbols"
+          aria-haspopup="listbox" aria-expanded="false" aria-autocomplete="list"
+          role="combobox" aria-controls="m-sym-dropdown-list">
+        <svg class="sym-search-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="sym-dropdown" id="m-sym-dropdown" role="listbox" aria-label="Perpetual symbols">
+          <ul class="sym-dropdown-list" id="m-sym-dropdown-list"></ul>
+        </div>
+      </div>
+      <div class="sym-selected-display" id="m-sym-selected"></div>
+    </div>
+
+    <!-- GO button -->
+    <div class="panel-section">
+      <div class="panel-section-title">Trade Entry</div>
+      <button class="go-btn" id="m-go-btn" disabled>
+        <svg class="go-spinner" id="m-go-spinner" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="3" stroke-dasharray="28 56" stroke-linecap="round">
+            <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite"/>
+          </circle>
+        </svg>
+        GO — ENTER NOW
+      </button>
+      <div class="status-msg" id="m-go-msg"></div>
+    </div>
+
+  </aside>
+
+  <!-- ── CHART ── -->
+  <div class="manual-chart-area">
+    <div class="chart-label">
+      CHART&nbsp;·&nbsp;<span class="chart-sym" id="chart-sym-label">—</span>
+      <span style="color:var(--ink-ghost);font-size:0.58rem;">Binance USDT-M Perpetual · Advanced Chart</span>
+    </div>
+    <div class="chart-wrap">
+      <div id="tv-chart-container"></div>
+      <div class="chart-fallback" id="chart-fallback">
+        <div>TradingView chart unavailable.</div>
+        <a href="https://www.binance.com/en/futures" target="_blank" rel="noopener noreferrer">Open Binance Futures ↗</a>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── Control helper (tokenless — localhost only) ──
+async function mControl(path, body, msgId) {
+  const target = msgId || 'm-ctrl-msg';
+  try {
+    const resp = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : null,
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      let msg = resp.status === 409 ? (text || 'Conflict — action not allowed in current state')
+              : (text || `${resp.status} error`);
+      mShowMsg(target, msg, true);
+      return null;
+    }
+    return await resp.json();
+  } catch(e) {
+    mShowMsg(target, 'Network error: ' + (e.message || e), true);
+    return null;
+  }
+}
+
+function mShowMsg(id, txt, isErr) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = txt;
+  el.style.color = isErr ? 'var(--loss)' : 'var(--profit)';
+  setTimeout(() => { el.textContent = ''; }, 5000);
+}
+
+// ── State ──
+let mState = { auto_running: false, manual_running: false, mode: 'IDLE', paused: false };
+let mSelectedSymbol = '';
+
+function mApplyState(state) {
+  mState = state;
+  const dot   = document.getElementById('m-state-dot');
+  const label = document.getElementById('m-state-label');
+  const warn  = document.getElementById('m-auto-warn');
+  const startBtn = document.getElementById('m-start-btn');
+  const stopBtn  = document.getElementById('m-stop-btn');
+
+  if (state.auto_running) {
+    dot.className = 'state-dot dot-active';
+    label.textContent = 'AUTO RUNNING';
+    warn.style.display = '';
+    if (startBtn) { startBtn.disabled = true;  startBtn.title = 'Stop the auto bot first'; }
+    if (stopBtn)  { stopBtn.disabled  = true;  stopBtn.title  = 'Auto bot is active — use the dashboard STOP'; }
+  } else if (state.manual_running) {
+    dot.className = 'state-dot dot-manual';
+    label.textContent = 'MANUAL RUNNING';
+    warn.style.display = 'none';
+    if (startBtn) { startBtn.disabled = true;  startBtn.title = 'Manual engine already running'; }
+    if (stopBtn)  { stopBtn.disabled  = false; stopBtn.title  = ''; }
+  } else {
+    dot.className = 'state-dot';
+    label.textContent = 'IDLE';
+    warn.style.display = 'none';
+    if (startBtn) { startBtn.disabled = false; startBtn.title = ''; }
+    if (stopBtn)  { stopBtn.disabled  = true;  stopBtn.title  = 'No manual session active'; }
+  }
+  mUpdateGoBtn();
+}
+
+function mUpdateGoBtn() {
+  const btn = document.getElementById('m-go-btn');
+  if (!btn) return;
+  const ready = mState.manual_running && mSelectedSymbol;
+  btn.disabled = !ready;
+  if (!mState.manual_running) btn.title = 'Start the manual engine first';
+  else if (!mSelectedSymbol)  btn.title = 'Select a symbol first';
+  else                        btn.title = '';
+}
+
+async function mRefreshState() {
+  try {
+    const r = await fetch('/api/control/state');
+    if (r.ok) mApplyState(await r.json());
+  } catch(e) { /* ignore */ }
+}
+mRefreshState();
+setInterval(mRefreshState, 3000);
+
+// ── Start / Stop manual ──
+document.getElementById('m-start-btn').addEventListener('click', async function() {
+  this.disabled = true;
+  const r = await mControl('/api/control/manual/start', null);
+  if (r) { mShowMsg('m-ctrl-msg', 'Manual engine started', false); await mRefreshState(); }
+  else this.disabled = false;
+});
+document.getElementById('m-stop-btn').addEventListener('click', async function() {
+  this.disabled = true;
+  const r = await mControl('/api/control/manual/stop', null);
+  if (r) { mShowMsg('m-ctrl-msg', 'Manual engine stopped', false); await mRefreshState(); }
+  else this.disabled = false;
+});
+
+// ── Symbol search dropdown ──
+let mAllSymbols = [];
+let mKbdIndex = -1;
+
+const symSearch   = document.getElementById('m-sym-search');
+const symDropdown = document.getElementById('m-sym-dropdown');
+const symList     = document.getElementById('m-sym-dropdown-list');
+
+function symOpen() {
+  const rect = symSearch.getBoundingClientRect();
+  symDropdown.style.left   = rect.left + 'px';
+  symDropdown.style.top    = (rect.bottom + 2) + 'px';
+  symDropdown.style.width  = rect.width + 'px';
+  symDropdown.classList.add('open');
+  symSearch.setAttribute('aria-expanded', 'true');
+  mKbdIndex = -1;
+}
+
+function symClose() {
+  symDropdown.classList.remove('open');
+  symSearch.setAttribute('aria-expanded', 'false');
+  mKbdIndex = -1;
+}
+
+function symToggle() {
+  if (symDropdown.classList.contains('open')) symClose();
+  else { mRenderDropdown(mAllSymbols); symOpen(); }
+}
+
+function mRenderDropdown(syms) {
+  if (!syms.length) {
+    symList.innerHTML = '<li class="sym-dropdown-empty">No symbols match</li>';
+    return;
+  }
+  symList.innerHTML = syms.map(s =>
+    `<li role="option" tabindex="-1" data-sym="${s}"${s === mSelectedSymbol ? ' class="sym-active"' : ''}>${s}</li>`
+  ).join('');
+  symList.querySelectorAll('li[data-sym]').forEach(li => {
+    li.addEventListener('mousedown', e => { e.preventDefault(); mSelectSymbol(li.dataset.sym); });
+  });
+}
+
+symSearch.addEventListener('click', function() {
+  const q = this.value.trim().toUpperCase();
+  mRenderDropdown(q ? mAllSymbols.filter(s => s.includes(q)) : mAllSymbols);
+  symOpen();
+});
+symSearch.addEventListener('focus', function() {
+  const q = this.value.trim().toUpperCase();
+  mRenderDropdown(q ? mAllSymbols.filter(s => s.includes(q)) : mAllSymbols);
+  symOpen();
+});
+symSearch.addEventListener('input', function() {
+  const q = this.value.trim().toUpperCase();
+  const filtered = q ? mAllSymbols.filter(s => s.includes(q)) : mAllSymbols;
+  mRenderDropdown(filtered);
+  if (!symDropdown.classList.contains('open')) symOpen();
+  mKbdIndex = -1;
+});
+symSearch.addEventListener('keydown', function(e) {
+  const items = symList.querySelectorAll('li[data-sym]');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (!symDropdown.classList.contains('open')) { mRenderDropdown(mAllSymbols); symOpen(); }
+    mKbdIndex = Math.min(mKbdIndex + 1, items.length - 1);
+    items.forEach((li, i) => li.classList.toggle('sym-kbd-focus', i === mKbdIndex));
+    if (items[mKbdIndex]) items[mKbdIndex].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    mKbdIndex = Math.max(mKbdIndex - 1, 0);
+    items.forEach((li, i) => li.classList.toggle('sym-kbd-focus', i === mKbdIndex));
+    if (items[mKbdIndex]) items[mKbdIndex].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (mKbdIndex >= 0 && items[mKbdIndex]) mSelectSymbol(items[mKbdIndex].dataset.sym);
+    else if (items.length === 1) mSelectSymbol(items[0].dataset.sym);
+  } else if (e.key === 'Escape') {
+    symClose();
+    this.blur();
+  }
+});
+document.addEventListener('click', function(e) {
+  if (!document.getElementById('sym-picker').contains(e.target) && !symDropdown.contains(e.target)) symClose();
+});
+window.addEventListener('resize', function() {
+  if (symDropdown.classList.contains('open')) {
+    const rect = symSearch.getBoundingClientRect();
+    symDropdown.style.left  = rect.left + 'px';
+    symDropdown.style.top   = (rect.bottom + 2) + 'px';
+    symDropdown.style.width = rect.width + 'px';
+  }
+});
+
+function mSelectSymbol(sym) {
+  mSelectedSymbol = sym;
+  symSearch.value = sym;
+  symClose();
+  const lbl = document.getElementById('m-sym-selected');
+  if (lbl) lbl.innerHTML = 'Selected: <strong>' + sym + '</strong>';
+  document.getElementById('chart-sym-label').textContent = sym;
+  mUpdateGoBtn();
+  mLoadChart(sym);
+}
+
+async function mLoadSymbols() {
+  symList.innerHTML = '<li class="sym-dropdown-empty">Loading symbols…</li>';
+  try {
+    const r = await fetch('/api/symbols/perps');
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    mAllSymbols = d.symbols || [];
+    mRenderDropdown(mAllSymbols);
+  } catch(e) {
+    symList.innerHTML = '<li class="sym-dropdown-empty" style="color:var(--loss);">Failed to load — <button onclick="mLoadSymbols()" style="background:none;border:none;color:var(--accent);cursor:pointer;font-family:var(--font-mono);font-size:0.68rem;padding:0;">retry</button></li>';
+  }
+}
+mLoadSymbols();
+
+// ── TradingView chart ──
+let tvWidget = null;
+let tvScriptLoaded = false;
+let tvScriptLoading = false;
+
+function mLoadChart(sym) {
+  const container = document.getElementById('tv-chart-container');
+  const fallback  = document.getElementById('chart-fallback');
+  if (!container) return;
+  container.innerHTML = '';
+  if (fallback) fallback.style.display = 'none';
+
+  const tvSym = 'BINANCE:' + sym + '.P';
+
+  function buildWidget() {
+    try {
+      tvWidget = new TradingView.widget({
+        container_id: 'tv-chart-container',
+        autosize: true,
+        symbol: tvSym,
+        interval: '60',
+        timezone: 'Etc/UTC',
+        theme: 'dark',
+        style: '1',
+        locale: 'en',
+        toolbar_bg: '#131619',
+        enable_publishing: false,
+        hide_top_toolbar: false,
+        hide_legend: false,
+        save_image: false,
+        studies: [],
+      });
+    } catch(e) {
+      if (fallback) fallback.style.display = 'flex';
+    }
+  }
+
+  if (tvScriptLoaded) {
+    buildWidget();
+    return;
+  }
+  if (tvScriptLoading) {
+    // Queue: check every 200ms until loaded
+    const poll = setInterval(() => {
+      if (tvScriptLoaded) { clearInterval(poll); buildWidget(); }
+    }, 200);
+    return;
+  }
+
+  tvScriptLoading = true;
+  const script = document.createElement('script');
+  script.src = 'https://s3.tradingview.com/tv.js';
+  script.onload  = () => { tvScriptLoaded = true; buildWidget(); };
+  script.onerror = () => {
+    tvScriptLoading = false;
+    if (fallback) fallback.style.display = 'flex';
+  };
+  document.head.appendChild(script);
+}
+
+// ── GO button ──
+document.getElementById('m-go-btn').addEventListener('click', async function() {
+  if (!mSelectedSymbol) return;
+  if (!confirm('LIVE REAL-MONEY TRADE\n\nThis will open a live position on ' + mSelectedSymbol + ' using real funds.\n\nContinue?')) return;
+  const spinner = document.getElementById('m-go-spinner');
+  this.disabled = true;
+  if (spinner) spinner.style.display = 'block';
+  const r = await mControl('/api/control/manual/enter', { symbol: mSelectedSymbol, signal: 'go' }, 'm-go-msg');
+  if (spinner) spinner.style.display = 'none';
+  if (r) {
+    mShowMsg('m-go-msg', 'Trade entered on ' + mSelectedSymbol, false);
+    await mRefreshState();
+  } else {
+    mUpdateGoBtn();
+  }
+});
+
+// ── Hamburger nav ──
+(function() {
+  const btn = document.getElementById('hb-btn');
+  const dd  = document.getElementById('hb-dropdown');
+  if (!btn || !dd) return;
+  function hbOpen()  { dd.classList.add('hb-open');    btn.setAttribute('aria-expanded','true'); }
+  function hbClose(refocus) { dd.classList.remove('hb-open'); btn.setAttribute('aria-expanded','false'); if (refocus) btn.focus(); }
+  btn.addEventListener('click', function(e) { e.stopPropagation(); dd.classList.contains('hb-open') ? hbClose(true) : hbOpen(); });
+  document.addEventListener('click', function(e) { if (dd.classList.contains('hb-open') && !dd.contains(e.target) && e.target !== btn) hbClose(false); });
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape' && dd.classList.contains('hb-open')) hbClose(true); });
+})();
 </script>
 </body>
 </html>"""
@@ -1634,6 +2846,25 @@ def index():
 @app.route("/dashboard")
 def dashboard():
     return render_template_string(HTML)
+
+
+@app.route("/manual")
+def manual():
+    return render_template_string(MANUAL_HTML)
+
+
+@app.route("/api/symbols/perps")
+def api_symbols_perps():
+    """Return list of USDT-M perpetual symbols. No token required (read-only)."""
+    try:
+        from perps import fetch_usdt_perps
+        syms = fetch_usdt_perps() or []
+    except Exception:
+        # Fallback: use configured symbols from cache/bot_status
+        with _cache_lock:
+            raw = _cache.get("symbols", [])
+        syms = [s["name"] if isinstance(s, dict) else str(s) for s in raw] if raw else []
+    return jsonify({"symbols": syms})
 
 
 @app.route("/api/data")
@@ -1836,7 +3067,6 @@ def _update_cache():
             "avg_win": round(avg_w, 4) if avg_w is not None else None,
             "avg_loss": round(avg_l, 4) if avg_l is not None else None,
             "bot_alive": bool(bot_status.get("bot_alive", _bot_alive())),
-            "oracle_enabled": bool(bot_status.get("oracle", False)),
             "balance": float(bot_status.get("balance", 0.0)),
             "symbols": bot_status.get("symbols", []),
             "baskets": _fetch_baskets(),
@@ -1858,7 +3088,7 @@ def main():
     args = parser.parse_args()
     Thread(target=_poll_loop, daemon=True).start()
     print(f"DCA Bot: http://localhost:{args.port}")
-    app.run(host="0.0.0.0", port=args.port, debug=False)
+    app.run(host="127.0.0.1", port=args.port, debug=False)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import sys
@@ -34,11 +35,48 @@ _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+# Load .env (Binance HMAC keys, oracle, control token) so the dashboard-launched
+# subprocess inherits real credentials even when the parent shell didn't export them.
+# override=True: .env is the canonical credential source for this project — a stale
+# or wrong-type key exported in the parent shell (e.g. an Ed25519 key) must not win.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_HERE / ".env", override=True)
+except ImportError:
+    pass
+
 from config import StrategyConfig
 from strategy import CheckpointStrategy
-from oracle import AiOracle, OracleDecision
 
 logger = logging.getLogger("bot")
+
+
+# ---------------------------------------------------------------------------
+# PID helpers (duplicated in trade.py — do NOT extract to shared module to
+# avoid circular imports since trade.py imports DcaBot from bot.py)
+# ---------------------------------------------------------------------------
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with *pid* is currently running.
+
+    Cross-platform:
+    - POSIX: os.kill(pid, 0) raises OSError(ESRCH) when the process does not exist.
+    - Windows: os.kill(pid, 0) is NOT supported; use ctypes OpenProcess instead.
+    """
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if handle == 0:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, ProcessLookupError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -68,19 +106,9 @@ class GlobalConfig:
     fee_taker: float = 0.0005
     fee_maker: float = 0.0002
     poll_interval_sec: int = 60
-
-
-def _expand_oracle_key(oc: dict | None) -> dict | None:
-    """Expand env vars in oracle config keys."""
-    if oc is None:
-        return None
-    expanded = {}
-    for k, v in oc.items():
-        if isinstance(v, str):
-            expanded[k] = os.path.expandvars(v)
-        else:
-            expanded[k] = v
-    return expanded
+    risk_per_trade_pct: float = 0.0       # 0 = use fixed base_margin; >0 = % of balance
+    trail_activate_pct: float = 1.0       # 0 = disabled, % above avg_entry to activate
+    trail_buffer_pct: float = 0.3         # trail stop = highest_price * (1 - buffer/100)
 
 
 @dataclass
@@ -89,7 +117,6 @@ class BotConfig:
     global_: GlobalConfig
     api_key: str
     api_secret: str
-    oracle: Optional[dict] = None  # opencode_api_key, endpoint, model
 
     @classmethod
     def from_yaml(cls, path: str) -> BotConfig:
@@ -102,7 +129,6 @@ class BotConfig:
             global_=glob,
             api_key=os.path.expandvars(raw["api"]["key"]),
             api_secret=os.path.expandvars(raw["api"]["secret"]),
-            oracle=_expand_oracle_key(raw.get("oracle")),
         )
 
     def active_symbols(self) -> list[SymbolConfig]:
@@ -113,10 +139,6 @@ class BotConfig:
                 out.append(s)
                 seen.add(s.name)
         return out
-
-    @property
-    def oracle_enabled(self) -> bool:
-        return self.oracle is not None and bool(self.oracle.get("opencode_api_key"))
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +207,11 @@ class Basket:
     n_safety_filled: int = 0
     entry_time: str | None = None
     exit_reason: str | None = None
+    trail_activated: bool = False
+    trail_highest: float = 0.0
+    trail_stop_price: float | None = None
+    trail_active_stop_order_id: int | None = None
+    trail_stop_is_algo: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +301,10 @@ class DcaBot:
         # Binance client (Futures)
         if not dry_run:
             self.client = BinanceClient(config.api_key, config.api_secret)
+            # Sync local clock drift to Binance server time (fixes -1021 timestamp errors)
+            server_ms = self.client.futures_time()["serverTime"]
+            self.client.timestamp_offset = server_ms - int(time.time() * 1000)
+            logger.info("Clock offset to Binance server: %d ms", self.client.timestamp_offset)
             self.client.futures_change_leverage(symbol=config.active_symbols()[0].name, leverage=self.g.leverage) if config.active_symbols() else None
         else:
             self.client = None
@@ -300,21 +331,13 @@ class DcaBot:
         if not dry_run:
             _init_trade_log()
 
-        # Oracle (AI timing layer)
-        self.oracle: AiOracle | None = None
-        if config.oracle_enabled:
-            oc = config.oracle
-            model = oc.get("model") or ""
-            if model.endswith("-free") and "opencode.ai" in (oc.get("endpoint") or ""):
-                logger.warning("Oracle disabled: free OpenCode model returns empty content")
-            else:
-                self.oracle = AiOracle(
-                    api_key=oc["opencode_api_key"],
-                    endpoint=oc.get("endpoint"),
-                    model=model,
-                )
-                logger.info("Oracle AI timing enabled: model=%s endpoint=%s",
-                             self.oracle.model, self.oracle.endpoint)
+        # Engine seam: trade.py sets False so the new-entry signal scan is skipped
+        # while basket management (TP/stop/safety) continues normally.
+        self.auto_entry: bool = True
+
+        # Control state — updated each cycle from bot_control.json
+        self.paused: bool = False
+        self.disabled_symbols: list[str] = []
 
     def _all_symbols_str(self) -> str:
         return ",".join(s.name for s in self.cfg.active_symbols())
@@ -471,8 +494,14 @@ class DcaBot:
         entry_price_r = _round_price(entry_price, lf)
 
         # Compute DCA ladder
+        # Adaptive sizing: use risk_per_trade_pct of available balance if configured
+        if g.risk_per_trade_pct > 0 and not self.dry_run:
+            bal = self._available_balance()
+            effective_base = bal * g.risk_per_trade_pct
+        else:
+            effective_base = g.base_margin
         tr = _dca_total_ratio(g)
-        base_notional = (g.base_margin * g.leverage) / tr
+        base_notional = (effective_base * g.leverage) / tr
         base_qty = _round_qty(base_notional / entry_price_r, lf)
 
         if base_qty < lf["minQty"]:
@@ -501,26 +530,7 @@ class DcaBot:
         basket.total_fees = entry_fee
 
         logger.info("%s: ENTER  base=%.4f$ notional=%.2f qty=%s price=%s",
-                     symbol, g.base_margin, base_notional, base_qty, entry_price_r)
-
-        # ── Oracle gate ──
-        if self.oracle is not None and not self.dry_run:
-            decision = self.oracle.decide(
-                symbol=symbol,
-                klines=self._fetch_klines(symbol, limit=15),
-                prev_trade=self.last_trade.get(symbol),
-                tp_pct=sc.tp_pct,
-                stop_pct=sc.stop_pct,
-            )
-            if decision is None:
-                # FAIL CLOSED: oracle is a risk gate; if it's down, do not trade.
-                logger.warning("%s: oracle unavailable — BLOCKING entry (fail-closed)", symbol)
-                return
-            elif decision.signal == "no-go":
-                logger.info("%s: oracle says NO-GO (%.2f) — %s. Skipping.",
-                            symbol, decision.confidence, decision.reason)
-                return
-            # else "go" — proceed
+                     symbol, effective_base, base_notional, base_qty, entry_price_r)
 
         if self.dry_run:
             basket.state = "active"
@@ -532,6 +542,9 @@ class DcaBot:
             tp_price = entry_price_r * (1.0 + sc.tp_pct / 100.0)
             stop_price = entry_price_r * (1.0 - sc.stop_pct / 100.0)
             logger.info("  TP: %.4f  Stop: %.4f", tp_price, stop_price)
+            if g.trail_activate_pct > 0:
+                logger.info("  Trail: activate at +%.1f%%, buffer %.1f%%",
+                            g.trail_activate_pct, g.trail_buffer_pct)
             self.baskets[symbol] = basket
             return
 
@@ -544,11 +557,22 @@ class DcaBot:
             basket.base_order_id = base_order["orderId"]
             basket.size_base = float(base_order.get("executedQty", base_qty))
             logger.info("  base order filled: %s", base_order.get("status"))
+        except (BinanceAPIException, Exception) as e:
+            logger.error("%s: base order placement error: %s", symbol, e)
+            self._cancel_orders(symbol)
+            return
 
-            # 2. Safety limit orders (POST_ONLY = maker)
-            for i in range(g.max_dca_orders):
-                sq = _round_qty(safety_notionals[i] / safety_prices[i], lf)
-                sp = _round_price(safety_prices[i], lf)
+        # Register basket immediately after base fill so the live position is
+        # tracked by _manage_baskets even if subsequent safety/TP/stop placements fail.
+        basket.state = "active"
+        self.baskets[symbol] = basket
+
+        # 2. Safety limit orders — per-order try/except so a single failure does
+        # not abandon the registered basket or prevent TP/stop from being placed.
+        for i in range(g.max_dca_orders):
+            sq = _round_qty(safety_notionals[i] / safety_prices[i], lf)
+            sp = _round_price(safety_prices[i], lf)
+            try:
                 so = self.client.futures_create_order(
                     symbol=symbol, side="BUY", type="LIMIT",
                     timeInForce="GTC", price=sp, quantity=sq,
@@ -557,53 +581,46 @@ class DcaBot:
                 basket.safety_order_ids.append(so["orderId"])
                 logger.info("  safety %d placed: qty=%s @ %.4f (orderId=%s)",
                              i + 1, sq, sp, so["orderId"])
+            except Exception as e:
+                logger.error("%s: safety order %d placement error (basket still active): %s",
+                             symbol, i + 1, e)
 
-            # 3. TP (TAKE_PROFIT_MARKET, reduceOnly)
-            total_qty = _round_qty(
-                (base_notional + sum(safety_notionals)) / entry_price_r, lf
+        # 3. TP (TAKE_PROFIT_MARKET, reduceOnly)
+        total_qty = _round_qty(
+            (base_notional + sum(safety_notionals)) / entry_price_r, lf
+        )
+        tp_price = _round_price(entry_price_r * (1.0 + sc.tp_pct / 100.0), lf)
+        try:
+            tp_resp = self.client.futures_create_order(
+                symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET",
+                quantity=total_qty, stopPrice=tp_price,
+                timeInForce="GTC", reduceOnly=True,
+                workingType="MARK_PRICE",
             )
-            tp_price = _round_price(entry_price_r * (1.0 + sc.tp_pct / 100.0), lf)
-            try:
-                tp_resp = self.client.futures_create_order(
-                    symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET",
-                    quantity=total_qty, stopPrice=tp_price,
-                    timeInForce="GTC", reduceOnly=True,
-                    workingType="MARK_PRICE",
-                )
-                logger.info("  TP raw resp: %s", dict(tp_resp))
-                # Conditional/algo orders return algoId instead of orderId
-                basket.tp_order_id = tp_resp.get("orderId") or tp_resp.get("algoId")
-                basket.tp_is_algo = "orderId" not in tp_resp
-            except Exception as e:
-                logger.warning("%s: TP order failed: %s", symbol, e)
-            basket.total_notional = base_notional + sum(safety_notionals)
-            logger.info("  TP: %.4f (id=%s)", tp_price, basket.tp_order_id)
-
-            # 4. Stop (STOP_MARKET, reduceOnly)
-            stop_price = _round_price(entry_price_r * (1.0 - sc.stop_pct / 100.0), lf)
-            try:
-                stop_resp = self.client.futures_create_order(
-                    symbol=symbol, side="SELL", type="STOP_MARKET",
-                    quantity=total_qty, stopPrice=stop_price,
-                    timeInForce="GTC", reduceOnly=True,
-                    workingType="MARK_PRICE",
-                )
-                # Conditional/algo orders return algoId instead of orderId
-                basket.stop_order_id = stop_resp.get("orderId") or stop_resp.get("algoId")
-                basket.stop_is_algo = "orderId" not in stop_resp
-            except Exception as e:
-                logger.warning("%s: Stop order failed: %s", symbol, e)
-            logger.info("  Stop: %.4f (id=%s)", stop_price, basket.stop_order_id)
-
-            basket.state = "active"
-            self.baskets[symbol] = basket
-
-        except BinanceAPIException as e:
-            logger.error("%s: order placement error: %s", symbol, e)
-            # Cleanup attempted orders
-            self._cancel_orders(symbol)
+            logger.info("  TP raw resp: %s", dict(tp_resp))
+            # Conditional/algo orders return algoId instead of orderId
+            basket.tp_order_id = tp_resp.get("orderId") or tp_resp.get("algoId")
+            basket.tp_is_algo = "orderId" not in tp_resp
         except Exception as e:
-            logger.error("%s: unexpected order error: %s", symbol, e)
+            logger.warning("%s: TP order failed: %s", symbol, e)
+        basket.total_notional = base_notional + sum(safety_notionals)
+        logger.info("  TP: %.4f (id=%s)", tp_price, basket.tp_order_id)
+
+        # 4. Stop (STOP_MARKET, reduceOnly)
+        stop_price = _round_price(entry_price_r * (1.0 - sc.stop_pct / 100.0), lf)
+        try:
+            stop_resp = self.client.futures_create_order(
+                symbol=symbol, side="SELL", type="STOP_MARKET",
+                quantity=total_qty, stopPrice=stop_price,
+                timeInForce="GTC", reduceOnly=True,
+                workingType="MARK_PRICE",
+            )
+            # Conditional/algo orders return algoId instead of orderId
+            basket.stop_order_id = stop_resp.get("orderId") or stop_resp.get("algoId")
+            basket.stop_is_algo = "orderId" not in stop_resp
+        except Exception as e:
+            logger.warning("%s: Stop order failed: %s", symbol, e)
+        logger.info("  Stop: %.4f (id=%s)", stop_price, basket.stop_order_id)
 
     # ------------------------------------------------------------------
     # Manage existing baskets
@@ -617,6 +634,7 @@ class DcaBot:
             if self.dry_run:
                 continue
             self._check_safety_fills(basket)
+            self._check_trail(basket)
             self._check_closure(basket)
 
     def _check_safety_fills(self, basket: Basket):
@@ -656,14 +674,10 @@ class DcaBot:
                 self._replace_tp(basket)
 
     def _replace_tp(self, basket: Basket):
-        """Cancel ALL open TP/stop orders for symbol, then re-place both at updated avg_entry.
+        """Cancel current TP and stop orders by tracked ID, then re-place both at updated avg_entry.
 
-        Strategy: since the bot runs at most one basket per symbol, sweeping ALL open and
-        algo orders for the symbol is simpler and more robust than per-id routing — it
-        guarantees no orphaned TP/stop regardless of whether the old orders were normal or
-        conditional/algo, and avoids any cancel-API mismatch.  Per-id routing would require
-        knowing whether each id is algo or normal before we even attempt the cancel, which
-        adds complexity with no safety benefit when there is always exactly one basket.
+        Cancels only basket.tp_order_id and basket.stop_order_id (algo-aware) so that
+        still-unfilled DCA safety LIMIT orders are preserved on the exchange.
         """
         symbol = basket.symbol
         lf = self._get_lot_filter(symbol)
@@ -671,21 +685,43 @@ class DcaBot:
         tp_price = _round_price(basket.avg_entry * (1.0 + basket.scfg.tp_pct / 100.0), lf)
         stop_price = _round_price(basket.avg_entry * (1.0 - basket.scfg.stop_pct / 100.0), lf)
 
-        # Cancel ALL open orders for this symbol (normal + conditional/algo)
-        try:
-            self.client.futures_cancel_all_open_orders(symbol=symbol)
-        except Exception as e:
-            logger.warning("%s: cancel_all_open_orders in _replace_tp: %s", symbol, e)
-        try:
-            self.client.futures_cancel_all_algo_open_orders(symbol=symbol)
-        except Exception as e:
-            logger.warning("%s: cancel_all_algo_open_orders in _replace_tp: %s", symbol, e)
+        # Cancel only the current TP and stop by their tracked IDs so that
+        # still-unfilled DCA safety LIMIT orders are not wiped.
+        if basket.tp_order_id is not None:
+            try:
+                if basket.tp_is_algo:
+                    self.client.futures_cancel_algo_order(symbol=symbol, algoId=basket.tp_order_id)
+                else:
+                    self.client.futures_cancel_order(symbol=symbol, orderId=basket.tp_order_id)
+            except Exception as e:
+                logger.warning("%s: cancel TP order %s in _replace_tp: %s", symbol, basket.tp_order_id, e)
 
-        # Reset tracked ids — they are no longer valid after sweep
+        if basket.stop_order_id is not None:
+            try:
+                if basket.stop_is_algo:
+                    self.client.futures_cancel_algo_order(symbol=symbol, algoId=basket.stop_order_id)
+                else:
+                    self.client.futures_cancel_order(symbol=symbol, orderId=basket.stop_order_id)
+            except Exception as e:
+                logger.warning("%s: cancel stop order %s in _replace_tp: %s", symbol, basket.stop_order_id, e)
+
+        # Cancel trail stop order too if active
+        if basket.trail_active_stop_order_id is not None:
+            try:
+                if basket.trail_stop_is_algo:
+                    self.client.futures_cancel_algo_order(symbol=symbol, algoId=basket.trail_active_stop_order_id)
+                else:
+                    self.client.futures_cancel_order(symbol=symbol, orderId=basket.trail_active_stop_order_id)
+            except Exception as e:
+                logger.warning("%s: cancel trail stop in _replace_tp: %s", symbol, e)
+
+        # Reset tracked ids — they are no longer valid
         basket.tp_order_id = None
         basket.tp_is_algo = False
         basket.stop_order_id = None
         basket.stop_is_algo = False
+        basket.trail_active_stop_order_id = None
+        basket.trail_stop_is_algo = False
 
         # Place new TP
         try:
@@ -693,6 +729,7 @@ class DcaBot:
                 symbol=symbol, side="SELL", type="TAKE_PROFIT_MARKET",
                 quantity=total_qty, stopPrice=tp_price,
                 timeInForce="GTC", reduceOnly=True,
+                workingType="MARK_PRICE",
             )
             basket.tp_order_id = o.get("orderId") or o.get("algoId")
             basket.tp_is_algo = "orderId" not in o
@@ -706,12 +743,30 @@ class DcaBot:
                 symbol=symbol, side="SELL", type="STOP_MARKET",
                 quantity=total_qty, stopPrice=stop_price,
                 timeInForce="GTC", reduceOnly=True,
+                workingType="MARK_PRICE",
             )
             basket.stop_order_id = o.get("orderId") or o.get("algoId")
             basket.stop_is_algo = "orderId" not in o
             logger.info("%s: Stop replaced at %.4f qty=%s (algo=%s)", symbol, stop_price, total_qty, basket.stop_is_algo)
         except Exception as e:
             logger.error("%s: replace stop error: %s", symbol, e)
+
+        # Re-place trail stop if active (cancel above killed the old one)
+        if basket.trail_activated and basket.trail_stop_price is not None:
+            try:
+                ts_price = _round_price(basket.trail_stop_price, lf)
+                o = self.client.futures_create_order(
+                    symbol=symbol, side="SELL", type="STOP_MARKET",
+                    quantity=total_qty, stopPrice=ts_price,
+                    timeInForce="GTC", reduceOnly=True,
+                    workingType="MARK_PRICE",
+                )
+                basket.trail_active_stop_order_id = o.get("orderId") or o.get("algoId")
+                basket.trail_stop_is_algo = "orderId" not in o
+                logger.info("%s: Trail stop re-placed at %.4f qty=%s (algo=%s)",
+                            symbol, ts_price, total_qty, basket.trail_stop_is_algo)
+            except Exception as e:
+                logger.error("%s: replace trail stop error: %s", symbol, e)
 
     def _check_closure(self, basket: Basket):
         """Check if TP or stop order filled → position closed."""
@@ -745,6 +800,20 @@ class DcaBot:
                         o = self.client.futures_get_order(symbol=symbol, orderId=basket.stop_order_id)
                     if o.get("status") == "FILLED" or o.get("algoStatus") == "FILLED":
                         exit_reason = "stop"
+                        exit_price = float(o.get("avgPrice") or o.get("triggerPrice") or 0)
+                        gross_pnl = (exit_price - basket.avg_entry) * basket.size_base
+                except Exception:
+                    pass
+
+            # Check trail stop (cancels hard stop, so check separately)
+            if exit_reason is None and basket.trail_active_stop_order_id is not None:
+                try:
+                    if basket.trail_stop_is_algo:
+                        o = self.client.futures_get_algo_order(symbol=symbol, algoId=basket.trail_active_stop_order_id)
+                    else:
+                        o = self.client.futures_get_order(symbol=symbol, orderId=basket.trail_active_stop_order_id)
+                    if o.get("status") == "FILLED" or o.get("algoStatus") == "FILLED":
+                        exit_reason = "trail_stop"
                         exit_price = float(o.get("avgPrice") or o.get("triggerPrice") or 0)
                         gross_pnl = (exit_price - basket.avg_entry) * basket.size_base
                 except Exception:
@@ -784,10 +853,78 @@ class DcaBot:
                     "n_safety_filled": basket.n_safety_filled, "pnl_pct": pnl_pct,
                 })
             else:
-                # Position flat but no exit order found → manual close
-                logger.info("%s: position flat, no exit order found. Resetting.", symbol)
-                self.strategies[symbol].reset()
-                del self.baskets[symbol]
+                # Position flat but no tracked exit order matched → closed some
+                # other way (manual close on Binance, TP/stop fill the order query
+                # missed, algo-status quirk). Reconstruct the trade from realized
+                # income so it still lands in the trade log instead of vanishing.
+                realized = self._reconstruct_realized_pnl(basket)
+                if realized is not None:
+                    gross_pnl, fees, funding = realized
+                    net_pnl = gross_pnl - fees + funding
+                    pnl_pct = net_pnl / basket.total_margin * 100 if basket.total_margin > 0 else 0.0
+                    _write_trade({
+                        "symbol": symbol,
+                        "entry_time": basket.entry_time or "",
+                        "exit_time": datetime.now(timezone.utc).isoformat(),
+                        "entry_price": basket.entry_price or 0.0,
+                        "exit_price": 0.0,
+                        "gross_pnl": round(gross_pnl, 6),
+                        "fees": round(fees, 6),
+                        "funding": round(funding, 6),
+                        "net_pnl": round(net_pnl, 6),
+                        "pnl_pct": round(pnl_pct, 4),
+                        "exit_reason": "manual",
+                        "n_safety_filled": basket.n_safety_filled,
+                        "base_margin": basket.total_margin,
+                        "leverage": self.g.leverage,
+                    })
+                    logger.info("%s: CLOSED (manual)  net=%.4f  pnl=%.2f%%  (reconstructed)",
+                                 symbol, net_pnl, pnl_pct)
+                    self._cancel_remaining_orders(basket)
+                    self.strategies[symbol].reset()
+                    del self.baskets[symbol]
+                    self._on_trade_closed(symbol, {
+                        "net_pnl": net_pnl, "exit_reason": "manual",
+                        "n_safety_filled": basket.n_safety_filled, "pnl_pct": pnl_pct,
+                    })
+                else:
+                    logger.warning("%s: position flat, could not reconstruct realized PnL. "
+                                   "Resetting without a trade-log row.", symbol)
+                    self._cancel_remaining_orders(basket)
+                    self.strategies[symbol].reset()
+                    del self.baskets[symbol]
+
+    def _reconstruct_realized_pnl(self, basket: Basket):
+        """Sum realized income for *basket* since entry from Binance income history.
+
+        Returns (gross_pnl, fees, funding) where gross_pnl is REALIZED_PNL,
+        fees is the (positive) absolute commission total, and funding is the
+        signed FUNDING_FEE total. Returns None in dry-run or on API failure so
+        the caller can decide how to degrade.
+        """
+        if self.dry_run or self.client is None:
+            return None
+        try:
+            start_ms = None
+            if basket.entry_time:
+                try:
+                    dt = datetime.fromisoformat(basket.entry_time)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    start_ms = int(dt.timestamp() * 1000) - 1000
+                except Exception:
+                    start_ms = None
+            params = {"symbol": basket.symbol, "limit": 1000}
+            if start_ms is not None:
+                params["startTime"] = start_ms
+            rows = self.client.futures_income_history(**params)
+            gross = sum(float(r["income"]) for r in rows if r.get("incomeType") == "REALIZED_PNL")
+            commission = sum(float(r["income"]) for r in rows if r.get("incomeType") == "COMMISSION")
+            funding = sum(float(r["income"]) for r in rows if r.get("incomeType") == "FUNDING_FEE")
+            return gross, abs(commission), funding
+        except Exception as e:
+            logger.error("%s: reconstruct realized PnL error: %s", basket.symbol, e)
+            return None
 
     def _cancel_remaining_orders(self, basket: Basket):
         """Cancel any unfilled safety/TP/stop orders, algo-aware."""
@@ -807,6 +944,11 @@ class DcaBot:
                 algo_ids.append(basket.stop_order_id)
             else:
                 normal_ids.append(basket.stop_order_id)
+        if basket.trail_active_stop_order_id is not None:
+            if basket.trail_stop_is_algo:
+                algo_ids.append(basket.trail_active_stop_order_id)
+            else:
+                normal_ids.append(basket.trail_active_stop_order_id)
 
         failed_normal = []
         for oid in normal_ids:
@@ -842,6 +984,144 @@ class DcaBot:
             self.client.futures_cancel_all_algo_open_orders(symbol=symbol)
         except Exception as e:
             logger.warning("%s: backstop cancel_all_algo_open_orders failed: %s", symbol, e)
+
+    # ------------------------------------------------------------------
+    # Trailing stop
+    # ------------------------------------------------------------------
+
+    def _check_trail(self, basket: Basket) -> None:
+        """Check and update trailing stop for a basket.
+
+        Called after _check_safety_fills, before _check_closure.
+        Trail is disabled when g.trail_activate_pct <= 0.
+        """
+        g = self.g
+        if g.trail_activate_pct <= 0:
+            return
+
+        symbol = basket.symbol
+
+        # Get current mark price
+        if self.dry_run:
+            return  # dry-run trail is logged at entry only; no simulated price feed
+        try:
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            mark = float(ticker["price"])
+        except Exception as e:
+            logger.warning("%s: trail mark price fetch error: %s", symbol, e)
+            return
+
+        lf = self._get_lot_filter(symbol)
+
+        if not basket.trail_activated:
+            # Check activation threshold
+            threshold = basket.avg_entry * (1.0 + g.trail_activate_pct / 100.0)
+            if mark < threshold:
+                return
+
+            # Activate trail
+            basket.trail_activated = True
+            basket.trail_highest = mark
+            basket.trail_stop_price = round(
+                mark * (1.0 - g.trail_buffer_pct / 100.0), 12
+            )
+
+            logger.info("%s: TRAIL ACTIVATED  mark=%.4f  trail_stop=%.4f",
+                        symbol, mark, basket.trail_stop_price)
+
+            # Cancel existing hard stop order
+            if basket.stop_order_id is not None:
+                self._cancel_stop_order(basket)
+
+            total_qty = _round_qty(basket.total_notional / basket.avg_entry, lf)
+            ts_price = _round_price(basket.trail_stop_price, lf)
+
+            # Place trailing STOP_MARKET reduceOnly order
+            try:
+                o = self.client.futures_create_order(
+                    symbol=symbol, side="SELL", type="STOP_MARKET",
+                    quantity=total_qty, stopPrice=ts_price,
+                    timeInForce="GTC", reduceOnly=True,
+                    workingType="MARK_PRICE",
+                )
+                basket.trail_active_stop_order_id = (
+                    o.get("orderId") or o.get("algoId")
+                )
+                basket.trail_stop_is_algo = "orderId" not in o
+                logger.info("%s: trail stop placed at %.4f (id=%s algo=%s)",
+                            symbol, ts_price,
+                            basket.trail_active_stop_order_id,
+                            basket.trail_stop_is_algo)
+            except Exception as e:
+                logger.error("%s: trail stop order failed: %s", symbol, e)
+            return
+
+        # Trail is already active — update highest and adjust stop
+        basket.trail_highest = max(basket.trail_highest, mark)
+        new_trail_stop = round(
+            basket.trail_highest * (1.0 - g.trail_buffer_pct / 100.0), 12
+        )
+
+        if new_trail_stop > (basket.trail_stop_price or 0):
+            basket.trail_stop_price = new_trail_stop
+            total_qty = _round_qty(basket.total_notional / basket.avg_entry, lf)
+            ts_price = _round_price(basket.trail_stop_price, lf)
+
+            # Cancel old trail stop
+            if basket.trail_active_stop_order_id is not None:
+                try:
+                    if basket.trail_stop_is_algo:
+                        self.client.futures_cancel_algo_order(
+                            symbol=symbol, algoId=basket.trail_active_stop_order_id
+                        )
+                    else:
+                        self.client.futures_cancel_order(
+                            symbol=symbol, orderId=basket.trail_active_stop_order_id
+                        )
+                except Exception as e:
+                    logger.warning("%s: cancel old trail stop failed: %s",
+                                   symbol, e)
+
+            # Place new trailing STOP_MARKET
+            try:
+                o = self.client.futures_create_order(
+                    symbol=symbol, side="SELL", type="STOP_MARKET",
+                    quantity=total_qty, stopPrice=ts_price,
+                    timeInForce="GTC", reduceOnly=True,
+                    workingType="MARK_PRICE",
+                )
+                basket.trail_active_stop_order_id = (
+                    o.get("orderId") or o.get("algoId")
+                )
+                basket.trail_stop_is_algo = "orderId" not in o
+                logger.info("%s: trail stop raised to %.4f (hi=%.4f, id=%s)",
+                            symbol, ts_price, basket.trail_highest,
+                            basket.trail_active_stop_order_id)
+            except Exception as e:
+                logger.error("%s: trail stop update order failed: %s",
+                             symbol, e)
+
+    def _cancel_stop_order(self, basket: Basket) -> None:
+        """Cancel the current hard stop order (not trail stop) on a basket."""
+        symbol = basket.symbol
+        if basket.stop_order_id is None:
+            return
+        try:
+            if basket.stop_is_algo:
+                self.client.futures_cancel_algo_order(
+                    symbol=symbol, algoId=basket.stop_order_id
+                )
+            else:
+                self.client.futures_cancel_order(
+                    symbol=symbol, orderId=basket.stop_order_id
+                )
+            logger.info("%s: stop order %s cancelled", symbol, basket.stop_order_id)
+        except Exception as e:
+            logger.warning("%s: cancel stop order %s failed: %s",
+                          symbol, basket.stop_order_id, e)
+            return  # keep old order id so _check_closure/exchange-order cleanup still knows about it
+        basket.stop_order_id = None
+        basket.stop_is_algo = False
 
     def _cancel_orders(self, symbol: str):
         """Cancel all open orders for a symbol (cleanup on error)."""
@@ -886,9 +1166,20 @@ class DcaBot:
         if not self._risk_check():
             return
 
+        # New-entry scan: skip entirely when auto_entry is False (trade.py manual mode)
+        # or when paused via bot_control.json.
+        if not self.auto_entry:
+            return
+        if self.paused:
+            logger.info("Bot paused via bot_control.json — skipping new-entry scan.")
+            return
+
         # Check signals for symbols without active baskets
         for sc in self.cfg.active_symbols():
             if sc.name in self.baskets:
+                continue
+            if sc.name in self.disabled_symbols:
+                logger.debug("%s: skipped — in disabled_symbols", sc.name)
                 continue
             active = sum(1 for b in self.baskets.values() if b.state != "closing")
             if active >= self.g.max_concurrent_baskets:
@@ -897,19 +1188,17 @@ class DcaBot:
             if signal != "enter":
                 continue
 
-            # ── Enter (oracle gate inside _enter, after sizing check) ──
             self._enter(sc)
-    # ponytail: oracle moved inside _enter() after sizing, so oracle not wasted on unfeasible symbols.
 
     def _on_trade_closed(self, symbol: str, trade_row: dict):
-        """Callback after a trade is logged. Updates last_trade for oracle."""
+        """Callback after a trade is logged. Updates last_trade history."""
         self.last_trade[symbol] = {
             "net_pnl": trade_row.get("net_pnl", 0),
             "exit_reason": trade_row.get("exit_reason", ""),
             "n_safety_filled": trade_row.get("n_safety_filled", 0),
             "pnl_pct": trade_row.get("pnl_pct", 0),
         }
-        logger.info("%s: last_trade updated for oracle (net=%.2f, reason=%s)",
+        logger.info("%s: last_trade updated (net=%.2f, reason=%s)",
                      symbol, self.last_trade[symbol]["net_pnl"],
                      self.last_trade[symbol]["exit_reason"])
 
@@ -922,13 +1211,23 @@ class DcaBot:
             # Build basket details for dashboard
             baskets = []
             for symbol, basket in self.baskets.items():
+                mark = liq = upnl = 0.0
+                if not self.dry_run:
+                    try:
+                        pos = self.client.futures_position_information(symbol=symbol)
+                        if pos:
+                            mark = float(pos[0].get("markPrice", 0) or 0)
+                            liq = float(pos[0].get("liquidationPrice", 0) or 0)
+                            upnl = float(pos[0].get("unRealizedProfit", 0) or 0)
+                    except Exception:
+                        pass  # leave zeros; dashboard falls back to live exchange read
                 baskets.append({
                     "symbol": symbol,
                     "avg_entry": basket.avg_entry or 0.0,
-                    "current_price": 0.0,
-                    "floating_pnl": 0.0,
+                    "current_price": mark,
+                    "floating_pnl": upnl,
                     "margin": round(basket.total_margin, 2),
-                    "liquidation": 0.0,
+                    "liquidation": liq,
                     "state": basket.state,
                     "entry_time": basket.entry_time or "",
                     "dca_levels": [],
@@ -936,11 +1235,13 @@ class DcaBot:
 
             status = {
                 "bot_alive": True,
-                "oracle": self.oracle is not None,
+                "mode": "auto",
+                "oracle": False,
                 "balance": round(bal, 2),
                 "active_baskets": len(self.baskets),
                 "baskets": baskets,
                 "symbols": [{"name": s.name, "tp_pct": s.tp_pct} for s in self.cfg.active_symbols()],
+                "oracle_history": [],
             }
             with open(str(_HERE / "bot_status.json"), "w") as f:
                 json.dump(status, f)
@@ -1178,9 +1479,44 @@ class DcaBot:
             basket.tp_order_id, basket.stop_order_id, basket.safety_order_ids,
         )
 
+    def _read_bot_control(self):
+        """Read bot_control.json and update self.paused / self.disabled_symbols.
+
+        Missing file or parse errors are silently ignored (fail open for control —
+        the bot continues normally rather than crashing the loop).
+        """
+        path = _HERE / "bot_control.json"
+        try:
+            if path.exists():
+                with open(path) as f:
+                    ctrl = json.load(f)
+                self.paused = bool(ctrl.get("paused", False))
+                self.disabled_symbols = [str(s) for s in ctrl.get("disabled_symbols", [])]
+            else:
+                self.paused = False
+                self.disabled_symbols = []
+        except Exception as e:
+            logger.warning("bot_control.json read error (ignored): %s", e)
+
     def run_loop(self):
         """Continuous loop with polling interval."""
         logger.info("Bot starting (poll=%ds, dry_run=%s)", self.g.poll_interval_sec, self.dry_run)
+
+        # Mutual exclusion: refuse to start if trade.py is alive
+        trade_pid_path = _HERE / "trade.pid"
+        if trade_pid_path.exists():
+            try:
+                pid = int(trade_pid_path.read_text().strip())
+                if _pid_alive(pid):
+                    logger.error(
+                        "trade.py is running (pid=%d). Cannot start bot.py. "
+                        "Stop trade.py first (or remove trade.pid if stale).", pid)
+                    return
+                else:
+                    logger.warning("Stale trade.pid (pid=%d dead) — ignoring.", pid)
+            except Exception as e:
+                logger.warning("Could not read trade.pid: %s", e)
+
         if not self.dry_run:
             bal = self._available_balance()
             logger.info("Available USDT: %.2f", bal)
@@ -1190,8 +1526,14 @@ class DcaBot:
 
         self.reconcile_on_start()
 
+        # Write pidfile
+        bot_pid_path = _HERE / "bot.pid"
+        bot_pid_path.write_text(str(os.getpid()))
+        logger.info("bot.pid written (pid=%d)", os.getpid())
+
         try:
             while True:
+                self._read_bot_control()
                 self.run_once()
                 self._write_status_json()
                 logger.info("cycle done — %d active basket(s); next check in %ds.",
@@ -1199,6 +1541,12 @@ class DcaBot:
                 time.sleep(self.g.poll_interval_sec)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
+        finally:
+            try:
+                bot_pid_path.unlink(missing_ok=True)
+                logger.info("bot.pid removed.")
+            except Exception as e:
+                logger.warning("Could not remove bot.pid: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -1244,10 +1592,22 @@ def main():
         logger.info("Symbols overridden: %s", [s.name for s in config.active_symbols()])
 
     # Validate API creds unless dry-run
-    if not config.api_key or not config.api_secret:
-        if not args.dry_run:
+    if not args.dry_run:
+        if not config.api_key or not config.api_secret:
             logger.error("API key/secret not set. Use BINANCE_API_KEY / BINANCE_API_SECRET env vars.")
             sys.exit(1)
+        # HMAC key id and secret are both 64-char alphanumeric. Catch
+        # unexpanded ${VARS}, whitespace, or pasted Ed25519/RSA keys here
+        # instead of as a cryptic Binance -1022 signature error at runtime.
+        for label, val in (("BINANCE_API_KEY", config.api_key), ("BINANCE_API_SECRET", config.api_secret)):
+            if len(val) != 64 or not val.isalnum():
+                logger.error(
+                    "%s looks malformed (len=%d, alnum=%s). Expect a 64-char alphanumeric "
+                    "HMAC-SHA256 credential. Check the env var is set and is not an "
+                    "Ed25519/RSA key or an unexpanded ${...} placeholder.",
+                    label, len(val), val.isalnum(),
+                )
+                sys.exit(1)
 
     bot = DcaBot(config, dry_run=args.dry_run)
 

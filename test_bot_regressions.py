@@ -114,52 +114,11 @@ class SignalRegressionTests(unittest.TestCase):
         self.assertEqual([s.name for s in cfg.active_symbols()], ["BTCUSDT"])
 
 
-class OracleStartupTests(unittest.TestCase):
-    def test_free_opencode_model_disables_oracle_once_at_startup(self):
-        cfg = BotConfig(
-            symbols=[SymbolConfig("BTCUSDT", 0.3, 3.0, True)],
-            global_=GlobalConfig(),
-            api_key="key",
-            api_secret="secret",
-            oracle={
-                "opencode_api_key": "key",
-                "endpoint": "https://opencode.ai/zen/v1",
-                "model": "deepseek-v4-flash-free",
-            },
-        )
-
-        with self.assertLogs("bot", level="WARNING") as logs:
-            bot = DcaBot(cfg, dry_run=True)
-
-        self.assertIsNone(bot.oracle)
-        self.assertIn("Oracle disabled", "\n".join(logs.output))
-
-    def test_local_free_model_keeps_oracle_enabled(self):
-        cfg = BotConfig(
-            symbols=[SymbolConfig("BTCUSDT", 0.3, 3.0, True)],
-            global_=GlobalConfig(),
-            api_key="key",
-            api_secret="secret",
-            oracle={
-                "opencode_api_key": "key",
-                "endpoint": "http://localhost:20128/v1",
-                "model": "oc/deepseek-v4-flash-free",
-            },
-        )
-
-        bot = DcaBot(cfg, dry_run=True)
-
-        self.assertIsNotNone(bot.oracle)
-        self.assertEqual(bot.oracle.endpoint, "http://localhost:20128/v1")
-        self.assertEqual(bot.oracle.model, "oc/deepseek-v4-flash-free")
-
-
 class DashboardRegressionTests(unittest.TestCase):
     def test_dashboard_status_comes_from_bot_status_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, "bot_status.json").write_text(json.dumps({
                 "bot_alive": True,
-                "oracle": True,
                 "balance": 10.05,
                 "symbols": [{"name": "BTCUSDT", "tp_pct": 0.3}],
             }))
@@ -171,7 +130,6 @@ class DashboardRegressionTests(unittest.TestCase):
 
         with dashboard._cache_lock:
             self.assertTrue(dashboard._cache["bot_alive"])
-            self.assertTrue(dashboard._cache["oracle_enabled"])
             self.assertEqual(dashboard._cache["balance"], 10.05)
             self.assertEqual(dashboard._cache["symbols"], [{"name": "BTCUSDT", "tp_pct": 0.3}])
 
@@ -434,8 +392,10 @@ class AlgoOrderRegressionTests(unittest.TestCase):
         self.assertIn(3000001931015058, algo_ids_cancelled)
         self.assertIn(3000001931015059, algo_ids_cancelled)
 
-    def test_replace_tp_uses_cancel_all_sweep_not_per_id(self):
-        """_replace_tp must sweep all orders via cancel_all methods (not per-id cancel)."""
+    def test_replace_tp_cancels_per_id_not_sweep(self):
+        """_replace_tp must cancel ONLY the tracked TP/stop by id, never a blanket
+        cancel-all sweep (which would also kill the still-unfilled DCA safety ladder).
+        Replacement TP/stop must carry workingType=MARK_PRICE."""
         from bot import Basket
         call_log = []
         client = self._make_algo_client(call_log)
@@ -472,21 +432,26 @@ class AlgoOrderRegressionTests(unittest.TestCase):
 
         methods_called = [c[0] for c in call_log]
 
-        # Must use cancel_all_open_orders + cancel_all_algo_open_orders sweep
-        self.assertIn("cancel_all_open_orders", methods_called)
-        self.assertIn("cancel_all_algo_open_orders", methods_called)
+        # Must NOT sweep all orders — that would cancel unfilled DCA safety orders.
+        self.assertNotIn("cancel_all_open_orders", methods_called,
+                         "_replace_tp must not blanket-cancel (kills the DCA ladder)")
+        self.assertNotIn("cancel_all_algo_open_orders", methods_called,
+                         "_replace_tp must not blanket-cancel algo orders")
 
-        # Must NOT have called per-id cancel_order or cancel_algo_order
-        self.assertNotIn("cancel_order", methods_called,
-                         "_replace_tp must not use per-id cancel_order")
-        self.assertNotIn("cancel_algo_order", methods_called,
-                         "_replace_tp must not use per-id cancel_algo_order")
+        # Must cancel exactly the tracked TP + stop by their algoIds.
+        algo_cancel_calls = [c for c in call_log if c[0] == "cancel_algo_order"]
+        algo_ids_cancelled = [c[1].get("algoId") for c in algo_cancel_calls]
+        self.assertIn(3000001931015058, algo_ids_cancelled)
+        self.assertIn(3000001931015059, algo_ids_cancelled)
 
-        # New TP and stop must be re-placed
+        # New TP and stop must be re-placed, both with MARK_PRICE working type.
         create_calls = [c for c in call_log if c[0] == "create_order"]
         order_types = [c[1].get("type") for c in create_calls]
         self.assertIn("TAKE_PROFIT_MARKET", order_types, "New TP order must be placed")
         self.assertIn("STOP_MARKET", order_types, "New stop order must be placed")
+        for c in create_calls:
+            self.assertEqual(c[1].get("workingType"), "MARK_PRICE",
+                             "replacement %s must trigger on MARK_PRICE" % c[1].get("type"))
 
         # New ids must be captured
         self.assertIsNotNone(basket.tp_order_id, "tp_order_id must be captured after replace")

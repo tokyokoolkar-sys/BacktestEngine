@@ -1,22 +1,22 @@
 symbols:
 - name: BNBUSDT
-  tp_pct: 0.3
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 - name: BTCUSDT
-  tp_pct: 0.3
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 - name: XRPUSDT
-  tp_pct: 0.3
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 - name: NEARUSDT
-  tp_pct: 0.8
+  tp_pct: 0.5
   stop_pct: 3.0
   active: true
 - name: INJUSDT
-  tp_pct: 0.8
+  tp_pct: 0.5
   stop_pct: 3.0
   active: true
 - name: TIAUSDT
@@ -32,7 +32,7 @@ symbols:
   stop_pct: 3.0
   active: true
 - name: ARBUSDT
-  tp_pct: 0.8
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 - name: APTUSDT
@@ -68,7 +68,7 @@ symbols:
   stop_pct: 3.0
   active: false
 - name: AAVEUSDT
-  tp_pct: 0.3
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 - name: AVAXUSDT
@@ -79,32 +79,24 @@ symbols:
   tp_pct: 0.5
   stop_pct: 3.0
   active: false
-- name: XRPUSDT
-  tp_pct: 0.3
-  stop_pct: 3.0
-  active: false
 - name: LTCUSDT
   tp_pct: 0.5
   stop_pct: 3.0
   active: false
-- name: BNBUSDT
-  tp_pct: 0.3
-  stop_pct: 3.0
-  active: false
-- name: BTCUSDT
-  tp_pct: 0.3
+- name: BCHUSDT
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 - name: BCHUSDT
-  tp_pct: 0.3
+  tp_pct: 0.5
   stop_pct: 3.0
   active: false
 global:
   leverage: 10
   base_margin: 2.5
   dca_margin: 2.5
-  max_dca_orders: 2
-  drop_step_pct: 0.5
+  max_dca_orders: 3
+  drop_step_pct: 0.3
   step_multiplier: 1.0
   size_multiplier: 1.1
   first_order_ratio: 0.96
@@ -113,10 +105,9 @@ global:
   fee_taker: 0.0005
   fee_maker: 0.0002
   poll_interval_sec: 60
+  trail_activate_pct: 1.0
+  trail_buffer_pct: 0.3
+  risk_per_trade_pct: 0.0
 api:
   key: ${BINANCE_API_KEY}
   secret: ${BINANCE_API_SECRET}
-oracle:
-  opencode_api_key: ${GENFITY_API_KEY}
-  endpoint: https://ai.genfity.com/v1
-  model: genfity/claude-opus-4.8

@@ -5,6 +5,15 @@ cache/
 *.zip
 .venv/
 
+# secrets — never commit
+.env
+
 # runtime state (live bot)
 bot_status.json
 bot_trade_log.csv
+perps_cache.json
+*.pid
+*.log
+
+# scratch / analysis throwaways
+_*.py

@@ -4,3 +4,5 @@ pyarrow
 requests
 python-binance
 pyyaml
+python-dotenv
+flask

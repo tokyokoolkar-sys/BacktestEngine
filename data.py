@@ -108,7 +108,7 @@ def download_klines(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "klines.parquet"
+    path = out_dir / f"{symbol}-{interval}-klines.parquet"
 
     if path.exists():
         logger.info("klines cache hit: %s", path)
@@ -202,7 +202,7 @@ def download_funding(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "funding.parquet"
+    path = out_dir / f"{symbol}-funding.parquet"
 
     if path.exists():
         logger.info("funding cache hit: %s", path)

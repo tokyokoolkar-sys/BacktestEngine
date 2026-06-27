@@ -50,7 +50,7 @@ def scorecard(result: Result) -> dict:
         }
 
     wins = [t.net_pnl for t in trades if t.net_pnl > 0]
-    losses = [t.net_pnl for t in trades if t.net_pnl <= 0]
+    losses = [t.net_pnl for t in trades if t.net_pnl < 0]
 
     win_rate = len(wins) / n_trades
     avg_win = sum(wins) / len(wins) if wins else 0.0

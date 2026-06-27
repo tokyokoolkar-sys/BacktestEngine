@@ -326,6 +326,9 @@ def run_backtest(
                         # TP price updates with new avg_entry (direction-aware)
                         if scfg.position_model == "dca":
                             tp_price = avg_entry * (1.0 - dcfg.take_profit_pct / 100.0) if _short else avg_entry * (1.0 + dcfg.take_profit_pct / 100.0)
+
+                        # Recompute stop after each safety fill (mirrors live bot _replace_tp)
+                        stop_price = _compute_stop(avg_entry, atr_arr[i], scfg)
                     else:
                         break  # triggers are in order; no need to check further
 
@@ -361,7 +364,7 @@ def run_backtest(
                     fees=total_fees + exit_fee,
                     funding=fund_paid,
                     net_pnl=net,
-                    pnl_pct=net / total_margin,
+                    pnl_pct=net / ecfg.margin_usdt,
                     exit_reason="liquidation",
                     n_safety_filled=n_safety_filled,
                 )
@@ -384,7 +387,7 @@ def run_backtest(
                     fees=total_fees + exit_fee,
                     funding=fund_paid,
                     net_pnl=net,
-                    pnl_pct=net / total_margin,
+                    pnl_pct=net / ecfg.margin_usdt,
                     exit_reason="stop",
                     n_safety_filled=n_safety_filled,
                 )
@@ -407,7 +410,7 @@ def run_backtest(
                     fees=total_fees + exit_fee,
                     funding=fund_paid,
                     net_pnl=net,
-                    pnl_pct=net / total_margin,
+                    pnl_pct=net / ecfg.margin_usdt,
                     exit_reason="take_profit",
                     n_safety_filled=n_safety_filled,
                 )
