@@ -330,11 +330,22 @@ class DcaBot:
                 config.api_key, config.api_secret,
                 requests_params={"timeout": 30},
             )
-            # Sync local clock drift to Binance server time (fixes -1021 timestamp errors)
-            server_ms = self.client.futures_time()["serverTime"]
-            self.client.timestamp_offset = server_ms - int(time.time() * 1000)
-            logger.info("Clock offset to Binance server: %d ms", self.client.timestamp_offset)
-            self.client.futures_change_leverage(symbol=config.active_symbols()[0].name, leverage=self.g.leverage) if config.active_symbols() else None
+            # Sync local clock drift to Binance server time (fixes -1021 timestamp errors).
+            # A transient network failure here must not kill boot — fall back to 0 offset
+            # and let the per-cycle loop guard handle any resulting timestamp errors.
+            try:
+                server_ms = self.client.futures_time()["serverTime"]
+                self.client.timestamp_offset = server_ms - int(time.time() * 1000)
+                logger.info("Clock offset to Binance server: %d ms", self.client.timestamp_offset)
+            except Exception as e:
+                logger.warning("Clock sync failed (using 0 offset): %s", e)
+            # Leverage preset is best-effort; failure here shouldn't block startup.
+            try:
+                if config.active_symbols():
+                    self.client.futures_change_leverage(
+                        symbol=config.active_symbols()[0].name, leverage=self.g.leverage)
+            except Exception as e:
+                logger.warning("Initial leverage preset failed: %s", e)
         else:
             self.client = None
 
@@ -566,9 +577,16 @@ class DcaBot:
                 # Scale base_notional to meet minNotional
                 scaled_notional = max(base_notional, min_notional)
                 base_qty = _round_qty(scaled_notional / entry_price_r, lf)
-                while base_qty * entry_price_r < min_notional and base_qty > 0:
-                    step = lf.get("stepSize", 0.001)
-                    base_qty = _round_qty(base_qty + step, lf)
+                # _round_qty floors via round_step_size, so base_qty+step floors back
+                # to base_qty under float drift — the old while-loop spun forever
+                # (same 39-min hang class as the safety ladder, fixed in 885511a).
+                # Compute the bump directly with ceil math instead.
+                step = lf.get("stepSize", 0.001)
+                if base_qty > 0 and base_qty * entry_price_r < min_notional:
+                    need = math.ceil((min_notional / entry_price_r) / step) * step
+                    base_qty = _round_qty(max(need, base_qty + step), lf)
+                    if base_qty * entry_price_r < min_notional:
+                        base_qty = _round_qty(base_qty + step, lf)
                 base_notional = base_qty * entry_price_r
                 effective_base = base_notional * tr / g.leverage
                 # Scaling up to minNotional pushes total margin (and stop-loss $ risk)
@@ -1292,11 +1310,16 @@ class DcaBot:
             active = sum(1 for b in self.baskets.values() if b.state != "closing")
             if active >= self.g.max_concurrent_baskets:
                 break
-            signal, klines = self._check_signal(sc.name)
-            if signal != "enter":
+            # Guard per-symbol: a signal/entry failure on one symbol must not
+            # starve the rest of the scan.
+            try:
+                signal, klines = self._check_signal(sc.name)
+                if signal != "enter":
+                    continue
+                self._enter(sc)
+            except Exception as e:
+                logger.exception("%s: entry scan error (skipping): %s", sc.name, e)
                 continue
-
-            self._enter(sc)
 
     def _on_trade_closed(self, symbol: str, trade_row: dict):
         """Callback after a trade is logged. Updates last_trade history."""
@@ -1616,8 +1639,13 @@ class DcaBot:
                 if already_present:
                     continue
                 sq = _round_qty(ladder_notionals[i] / sp, lf)
-                while sq * sp < min_notional and sq > 0:
-                    sq = _round_qty(sq + step, lf)
+                # ceil bump, not a while-loop: _round_qty floors, so sq+step can
+                # floor back to sq forever under float drift (885511a hang class).
+                if sq > 0 and sq * sp < min_notional:
+                    need = math.ceil((min_notional / sp) / step) * step
+                    sq = _round_qty(max(need, sq + step), lf)
+                    if sq * sp < min_notional:
+                        sq = _round_qty(sq + step, lf)
                 try:
                     resp = self.client.futures_create_order(
                         symbol=symbol, side="BUY", type="LIMIT",
@@ -1719,11 +1747,19 @@ class DcaBot:
 
         try:
             while True:
-                self._read_bot_control()
-                self.run_once()
-                self._write_status_json()
-                logger.info("cycle done — %d active basket(s); next check in %ds.",
-                            len(self.baskets), self.g.poll_interval_sec)
+                # One bad cycle (network error, exchange hiccup, bug in a single
+                # symbol's path) must NOT kill the loop — log it and keep polling.
+                # KeyboardInterrupt is re-raised so Ctrl-C still exits cleanly.
+                try:
+                    self._read_bot_control()
+                    self.run_once()
+                    self._write_status_json()
+                    logger.info("cycle done — %d active basket(s); next check in %ds.",
+                                len(self.baskets), self.g.poll_interval_sec)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.exception("cycle error (continuing): %s", e)
                 time.sleep(self.g.poll_interval_sec)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
