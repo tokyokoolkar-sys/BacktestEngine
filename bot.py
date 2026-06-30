@@ -624,9 +624,16 @@ class DcaBot:
 
         # 2. Safety limit orders — per-order try/except so a single failure does
         # not abandon the registered basket or prevent TP/stop from being placed.
+        min_notional = lf.get("minNotional", 5.0)
+        placed_safety_qty = 0.0
         for i in range(dca_n):
-            sq = _round_qty(safety_notionals[i] / safety_prices[i], lf)
             sp = _round_price(safety_prices[i], lf)
+            sq = _round_qty(safety_notionals[i] / sp, lf)
+            # round_step_size floors qty, so the smallest rung (base*first_order_ratio,
+            # ~0.96x) can land below minNotional even when the base order was scaled up
+            # to meet it — Binance then rejects with -4164. Bump qty up to clear it.
+            while sq * sp < min_notional and sq > 0:
+                sq = _round_qty(sq + lf.get("stepSize", 0.001), lf)
             try:
                 so = self.client.futures_create_order(
                     symbol=symbol, side="BUY", type="LIMIT",
@@ -634,6 +641,7 @@ class DcaBot:
                     # no reduceOnly on entry orders
                 )
                 basket.safety_order_ids.append(so["orderId"])
+                placed_safety_qty += sq
                 logger.info("  safety %d placed: qty=%s @ %.4f (orderId=%s)",
                              i + 1, sq, sp, so["orderId"])
             except Exception as e:
@@ -641,9 +649,11 @@ class DcaBot:
                              symbol, i + 1, e)
 
         # 3. TP (TAKE_PROFIT_MARKET, reduceOnly)
-        total_qty = _round_qty(
-            (base_notional + sum(safety_notionals)) / entry_price_r, lf
-        )
+        # Cover the actual max position (base fill + every placed safety qty, which the
+        # minNotional bump can push above the notional estimate). reduceOnly caps the
+        # close at the real position size, so over-stating is safe; under-stating would
+        # leave a residual after TP fires.
+        total_qty = _round_qty(basket.size_base + placed_safety_qty, lf)
         tp_price = _round_price(entry_price_r * (1.0 + sc.tp_pct / 100.0), lf)
         try:
             tp_resp = self.client.futures_create_order(

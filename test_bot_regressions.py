@@ -745,5 +745,72 @@ class ReconcileOnStartTests(unittest.TestCase):
         self.assertNotIn("BNBUSDT", bot.baskets)
 
 
+class SafetyMinNotionalRegressionTests(unittest.TestCase):
+    """Regression: safety orders must never be sent below minNotional (-4164).
+
+    When base_margin is small, the base order is risk-scaled up to minNotional.
+    The smallest safety rung (base * first_order_ratio ~0.96) then gets its qty
+    floored by round_step_size and can land below minNotional, which Binance
+    rejects with APIError(code=-4164). The bot must bump such a rung's qty up to
+    clear minNotional before sending it.
+    """
+
+    def _make_recording_client(self, price, calls):
+        class Client:
+            def futures_change_leverage(self, **kw):
+                pass
+
+            def futures_symbol_ticker(self, symbol):
+                return {"price": str(price)}
+
+            def futures_create_order(self_, **kw):
+                calls.append(kw)
+                oid = 1000 + len(calls)
+                return {"orderId": oid, "executedQty": str(kw.get("quantity", 0)),
+                        "status": "NEW"}
+
+            def futures_cancel_all_open_orders(self_, **kw):
+                pass
+
+            def futures_cancel_all_algo_open_orders(self_, **kw):
+                pass
+
+        return Client()
+
+    def test_safety_orders_never_below_min_notional(self):
+        # Reproduces the live log: integer-qty symbol near ~1.78, base_margin 2.5,
+        # 5 DCA rungs. Pre-fix, safety order 1 was sent at ~3.55 notional (< 5).
+        price = 1.783
+        min_notional = 5.0
+        calls = []
+        client = self._make_recording_client(price, calls)
+
+        bot = object.__new__(DcaBot)
+        bot.dry_run = False
+        bot.client = client
+        bot.g = GlobalConfig(base_margin=2.5, leverage=10, max_dca_orders=5)
+        bot.baskets = {}
+        bot.lot_filter_cache = {
+            "NEARUSDT": {"stepSize": 1.0, "tickSize": 0.001,
+                         "minQty": 1.0, "minNotional": min_notional}
+        }
+        bot.last_trade = {}
+        bot.oracle = None
+
+        bot._enter(SymbolConfig("NEARUSDT", tp_pct=0.5, stop_pct=3.0))
+
+        self.assertIn("NEARUSDT", bot.baskets, "Basket must be created")
+
+        # Every entry LIMIT (safety) order sent must clear minNotional.
+        safety_calls = [c for c in calls if c.get("type") == "LIMIT"]
+        self.assertGreater(len(safety_calls), 0, "expected safety LIMIT orders")
+        for c in safety_calls:
+            notional = float(c["quantity"]) * float(c["price"])
+            self.assertGreaterEqual(
+                notional, min_notional - 1e-9,
+                f"safety order sent below minNotional: qty={c['quantity']} "
+                f"price={c['price']} notional={notional:.4f}")
+
+
 if __name__ == "__main__":
     unittest.main()
