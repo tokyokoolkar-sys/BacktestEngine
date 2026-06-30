@@ -355,6 +355,7 @@ class DcaBot:
         self.last_candle_time: dict[str, int] = {}
         self.symbol_info_cache: dict[str, dict] = {}
         self.lot_filter_cache: dict[str, dict] = {}
+        self._exchange_info: dict | None = None  # full futures_exchange_info, fetched once
         self.last_trade: dict[str, dict | None] = {}
 
         for sc in config.active_symbols():
@@ -405,7 +406,19 @@ class DcaBot:
         if self.dry_run:
             return {"stepSize": 0.001, "tickSize": 0.001, "minQty": 0.001}
         if symbol not in self.lot_filter_cache:
-            sinfo = _symbol_info(self.client, symbol)
+            # futures_exchange_info() is the full exchange dump and weight-heavy.
+            # Fetch it ONCE and index every symbol from it, instead of re-pulling
+            # the whole dump for each new symbol (which burned API weight and was
+            # the prime suspect for the 2nd-entry-per-cycle stall).
+            if not self._exchange_info:
+                self._exchange_info = self.client.futures_exchange_info()
+            sinfo = None
+            for s in self._exchange_info["symbols"]:
+                if s["symbol"] == symbol:
+                    sinfo = s
+                    break
+            if sinfo is None:
+                raise ValueError(f"Symbol {symbol} not found in exchange info")
             self.symbol_info_cache[symbol] = sinfo
             self.lot_filter_cache[symbol] = _lot_filter(sinfo)
         return self.lot_filter_cache[symbol]
@@ -548,12 +561,14 @@ class DcaBot:
             except Exception as e:
                 logger.warning("%s: leverage change: %s", symbol, e)
 
+        logger.info("%s: _enter lot_filter...", symbol)
         lf = self._get_lot_filter(symbol)
 
         # Get current price
         if self.dry_run:
             entry_price = 10.0
         else:
+            logger.info("%s: _enter ticker...", symbol)
             ticker = self.client.futures_symbol_ticker(symbol=symbol)
             entry_price = float(ticker["price"])
 
