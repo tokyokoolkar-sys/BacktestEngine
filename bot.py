@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -77,6 +78,20 @@ def _pid_alive(pid: int) -> bool:
             return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def _order_already_gone(e: Exception) -> bool:
+    """True if a cancel failed because the order no longer exists.
+
+    Binance returns -2011 (Unknown order sent) / -2013 (Order does not exist)
+    when the order already filled or was already cancelled. For a cancel, that
+    means the goal is met — treat as success, not a retryable error.
+    """
+    code = getattr(e, "code", None)
+    if code in (-2011, -2013):
+        return True
+    s = str(e)
+    return "-2011" in s or "-2013" in s
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +326,10 @@ class DcaBot:
 
         # Binance client (Futures)
         if not dry_run:
-            self.client = BinanceClient(config.api_key, config.api_secret)
+            self.client = BinanceClient(
+                config.api_key, config.api_secret,
+                requests_params={"timeout": 30},
+            )
             # Sync local clock drift to Binance server time (fixes -1021 timestamp errors)
             server_ms = self.client.futures_time()["serverTime"]
             self.client.timestamp_offset = server_ms - int(time.time() * 1000)
@@ -633,8 +651,15 @@ class DcaBot:
             # round_step_size floors qty, so the smallest rung (base*first_order_ratio,
             # ~0.96x) can land below minNotional even when the base order was scaled up
             # to meet it — Binance then rejects with -4164. Bump qty up to clear it.
-            while sq * sp < min_notional and sq > 0:
-                sq = _round_qty(sq + lf.get("stepSize", 0.001), lf)
+            # Compute the bump directly: incremental round_step_size(sq+step) floors back
+            # to sq under float drift, so the old while-loop spun forever (39-min hang).
+            step = lf.get("stepSize", 0.001)
+            if sq > 0 and sq * sp < min_notional:
+                need = math.ceil((min_notional / sp) / step) * step
+                sq = _round_qty(max(need, sq + step), lf)
+                # one defensive step if float floor still left it short
+                if sq * sp < min_notional:
+                    sq = _round_qty(sq + step, lf)
             try:
                 so = self.client.futures_create_order(
                     symbol=symbol, side="BUY", type="LIMIT",
@@ -1032,6 +1057,8 @@ class DcaBot:
             try:
                 self.client.futures_cancel_order(symbol=symbol, orderId=oid)
             except Exception as e:
+                if _order_already_gone(e):
+                    continue  # order filled/cancelled already — cancel goal met
                 logger.warning("%s: cancel order %s failed (will retry): %s", symbol, oid, e)
                 failed_normal.append(oid)
 
@@ -1039,6 +1066,8 @@ class DcaBot:
             try:
                 self.client.futures_cancel_algo_order(symbol=symbol, algoId=oid)
             except Exception as e:
+                if _order_already_gone(e):
+                    continue  # order filled/cancelled already — cancel goal met
                 logger.warning("%s: cancel algo order %s failed (will retry): %s", symbol, oid, e)
                 # algo order cancel failure falls through to backstop sweep below
 
@@ -1194,9 +1223,11 @@ class DcaBot:
                 )
             logger.info("%s: stop order %s cancelled", symbol, basket.stop_order_id)
         except Exception as e:
-            logger.warning("%s: cancel stop order %s failed: %s",
-                          symbol, basket.stop_order_id, e)
-            return  # keep old order id so _check_closure/exchange-order cleanup still knows about it
+            if not _order_already_gone(e):
+                logger.warning("%s: cancel stop order %s failed: %s",
+                              symbol, basket.stop_order_id, e)
+                return  # keep old order id so _check_closure/exchange-order cleanup still knows about it
+            # order already gone — fall through to clear ids
         basket.stop_order_id = None
         basket.stop_is_algo = False
 
@@ -1651,6 +1682,23 @@ class DcaBot:
                     logger.warning("Stale trade.pid (pid=%d dead) — ignoring.", pid)
             except Exception as e:
                 logger.warning("Could not read trade.pid: %s", e)
+
+        # Self-exclusion: refuse to start if another bot.py is alive.
+        # Two live instances both adopt the same positions in reconcile_on_start
+        # and each logs the same trade on close — corrupting bot_trade_log.csv.
+        bot_pid_path = _HERE / "bot.pid"
+        if bot_pid_path.exists():
+            try:
+                pid = int(bot_pid_path.read_text().strip())
+                if _pid_alive(pid):
+                    logger.error(
+                        "Another bot.py is running (pid=%d). Refusing to start a "
+                        "second instance. Stop it first (or remove bot.pid if stale).", pid)
+                    return
+                else:
+                    logger.warning("Stale bot.pid (pid=%d dead) — ignoring.", pid)
+            except Exception as e:
+                logger.warning("Could not read bot.pid: %s", e)
 
         if not self.dry_run:
             bal = self._available_balance()

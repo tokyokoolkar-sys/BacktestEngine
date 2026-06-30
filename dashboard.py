@@ -2920,7 +2920,7 @@ def _get_binance_client():
         key = os.environ.get("BINANCE_API_KEY", "")
         secret = os.environ.get("BINANCE_API_SECRET", "")
         if key and secret:
-            _BINANCE_CLIENT = _BinanceClient(key, secret)
+            _BINANCE_CLIENT = _BinanceClient(key, secret, requests_params={"timeout": 30})
     return _BINANCE_CLIENT
 
 def _bot_alive() -> bool:
@@ -2977,7 +2977,7 @@ def _fetch_baskets() -> list:
         api_secret = os.environ.get("BINANCE_API_SECRET", "")
         if not api_key or not api_secret:
             return []
-        client = BinanceClient(api_key, api_secret)
+        client = BinanceClient(api_key, api_secret, requests_params={"timeout": 30})
 
         positions = []
         for attempt in range(3):

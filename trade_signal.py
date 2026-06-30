@@ -33,7 +33,7 @@ def _fetch_klines(symbol: str) -> list | None:
         api_secret = os.environ.get("BINANCE_API_SECRET", "")
         if not api_key or not api_secret:
             return None
-        client = Client(api_key, api_secret)
+        client = Client(api_key, api_secret, requests_params={"timeout": 30})
         return client.futures_klines(symbol=symbol, interval="1h", limit=15)
     except Exception as e:
         print(f"[error] Binance: {e}")
