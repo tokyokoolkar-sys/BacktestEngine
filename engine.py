@@ -297,7 +297,8 @@ def run_backtest(
 
     for i in range(1, n):
         prev_row = {"high": highs[i - 1]}
-        row = {"open": opens[i], "close": closes[i], "high": highs[i]}
+        row = {"open": opens[i], "close": closes[i], "high": highs[i],
+               "low": lows[i], "t": times[i]}
 
         # ------------------------------------------------------------------
         # 1. Intrabar checks for OPEN positions (using current bar i)
@@ -432,9 +433,13 @@ def run_backtest(
                 running_equity += closed_trade.net_pnl
                 equity_curve.append((closed_trade.exit_time, running_equity))
                 in_position = False
-                # Dual-mode: flip direction after each completed trade
+                # Dual-mode: flip direction after each completed trade.
+                # Refresh _short so the engine prices the next trade in the new
+                # direction — flip_direction mutates scfg.direction, but _short
+                # was cached once at function entry (line ~238).
                 if scfg.dual_mode:
                     strategy.flip_direction()
+                    _short = scfg.direction == "short"
                 # Strategy syncs its state on the NEXT call to on_closed_bar via the
                 # guard: `if not in_position and self._state == self._POS` — no explicit
                 # call needed here; we skip the rest of this iteration.
@@ -486,6 +491,7 @@ def run_backtest(
             in_position = False
             if scfg.dual_mode:
                 strategy.flip_direction()
+                _short = scfg.direction == "short"
 
         elif action == "enter" and not in_position:
             # Volume filter: skip entry during high-volume (panic) conditions
