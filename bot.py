@@ -1459,6 +1459,7 @@ class DcaBot:
         stop_order_id: int | None = None
         stop_is_algo = False
         safety_order_ids: list[int] = []
+        existing_safety_prices: list[float] = []
 
         for o in normal_orders:
             otype = o.get("type", "")
@@ -1474,6 +1475,11 @@ class DcaBot:
             elif not reduce_only and side == "BUY" and otype == "LIMIT":
                 if oid is not None:
                     safety_order_ids.append(oid)
+                    raw_price = o.get("price")
+                    if raw_price is not None:
+                        ep = float(raw_price)
+                        if ep > 0:
+                            existing_safety_prices.append(ep)
 
         for o in algo_orders:
             otype = o.get("orderType", o.get("type", ""))
@@ -1554,6 +1560,50 @@ class DcaBot:
                 "and Stop (id=%s algo=%s); no re-placement needed.",
                 symbol, tp_order_id, tp_is_algo, stop_order_id, stop_is_algo,
             )
+
+        # 6b. Top up missing DCA safety rungs (e.g. one rung lost to the old -4164
+        # minNotional bug). Only safe when no safety has filled (avg_entry == the
+        # original base entry, so the ladder reconstructs exactly) and the ladder is
+        # partial (some rungs still open). A fully-empty safety set (0 open) is left
+        # alone — could be a filled-and-consumed ladder we can't safely reconstruct.
+        if n_safety_filled == 0 and 0 < len(safety_order_ids) < dca_max:
+            logger.warning(
+                "RECONCILE: %s topping up safety ladder — %d open of %d expected (0 filled)",
+                symbol, len(safety_order_ids), dca_max,
+            )
+            lf = self._get_lot_filter(symbol)
+            min_notional = lf.get("minNotional", 5.0)
+            tick = lf.get("tickSize", 0.0)
+            step = lf.get("stepSize", 0.001)
+            base_notional = total_notional  # valid because n_safety_filled == 0
+            ladder_notionals = _dca_safety_notionals(self.g, base_notional, dca_max)
+            ladder_prices = _dca_safety_prices(avg_entry, self.g, dca_max)
+            tolerance = max(tick, 0.4 * avg_entry * (self.g.drop_step_pct / 100.0))
+            for i in range(dca_max):
+                sp = _round_price(ladder_prices[i], lf)
+                already_present = any(abs(sp - ep) <= tolerance for ep in existing_safety_prices)
+                if already_present:
+                    continue
+                sq = _round_qty(ladder_notionals[i] / sp, lf)
+                while sq * sp < min_notional and sq > 0:
+                    sq = _round_qty(sq + step, lf)
+                try:
+                    resp = self.client.futures_create_order(
+                        symbol=symbol, side="BUY", type="LIMIT",
+                        timeInForce="GTC", price=sp, quantity=sq,
+                    )
+                    oid = resp["orderId"]
+                    basket.safety_order_ids.append(oid)
+                    existing_safety_prices.append(sp)
+                    logger.info(
+                        "RECONCILE: %s topped up safety rung %d: qty=%s @ %.6f (id=%s)",
+                        symbol, i + 1, sq, sp, oid,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "RECONCILE: %s safety top-up rung %d failed: %s",
+                        symbol, i + 1, e,
+                    )
 
         # 7. Register into self.baskets
         self.baskets[symbol] = basket

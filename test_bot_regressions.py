@@ -745,6 +745,164 @@ class ReconcileOnStartTests(unittest.TestCase):
         self.assertNotIn("BNBUSDT", bot.baskets)
 
 
+    # ------------------------------------------------------------------
+    # Case (f): partial safety ladder (4 of 5 open) → top up missing rung
+    # ------------------------------------------------------------------
+    def test_reconcile_tops_up_missing_safety_rung(self):
+        """When 4 of 5 safety rungs are open (rung 1 missing), reconcile places exactly one new BUY LIMIT order.
+
+        Setup:
+          base_margin=5, leverage=10, entry=500
+          base_notional = 50, base_qty_est = 0.1
+          Ladder prices (drop_step_pct=0.5, step_multiplier=1.0):
+            rung1=497.5 (MISSING), rung2=495.0, rung3=492.5, rung4=490.0, rung5=487.5
+        """
+        create_calls = []
+        ENTRY = 500.0
+        BASE_QTY = 0.1  # = base_margin * leverage / entry = 50 / 500
+
+        class FakeClient:
+            def futures_position_information(self, symbol):
+                return [{"positionAmt": str(BASE_QTY), "entryPrice": str(ENTRY)}]
+
+            def futures_get_open_orders(self, symbol):
+                return [
+                    {"orderId": 201, "type": "TAKE_PROFIT_MARKET", "side": "SELL",
+                     "reduceOnly": True},
+                    {"orderId": 301, "type": "STOP_MARKET", "side": "SELL",
+                     "reduceOnly": True},
+                    # Rungs 2-5 open; rung 1 (497.5) is MISSING
+                    {"orderId": 401, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "495.0"},
+                    {"orderId": 402, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "492.5"},
+                    {"orderId": 403, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "490.0"},
+                    {"orderId": 404, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "487.5"},
+                ]
+
+            def futures_get_open_algo_orders(self, symbol):
+                return []
+
+            def futures_create_order(self_, **kw):
+                create_calls.append(kw)
+                return {"orderId": 5000 + len(create_calls), "status": "NEW"}
+
+        gcfg = GlobalConfig(leverage=10, base_margin=5.0, max_dca_orders=5)
+        scfg = SymbolConfig("BNBUSDT", tp_pct=0.5, stop_pct=3.0)
+        cfg = BotConfig(symbols=[scfg], global_=gcfg, api_key="key", api_secret="secret")
+
+        bot = object.__new__(DcaBot)
+        bot.cfg = cfg
+        bot.dry_run = False
+        bot.g = gcfg
+        bot.client = FakeClient()
+        bot.baskets = {}
+        bot.strategies = {}
+        bot.last_candle_time = {}
+        bot.symbol_info_cache = {}
+        bot.lot_filter_cache = {
+            "BNBUSDT": {"stepSize": 0.01, "tickSize": 0.01, "minQty": 0.01, "minNotional": 5.0},
+        }
+        bot.last_trade = {}
+        bot.oracle = None
+
+        with self.assertLogs("bot", level="INFO"):
+            bot.reconcile_on_start()
+
+        self.assertIn("BNBUSDT", bot.baskets)
+        b = bot.baskets["BNBUSDT"]
+
+        # Exactly one BUY LIMIT top-up order (the missing rung 1)
+        limit_topup = [c for c in create_calls
+                       if c.get("type") == "LIMIT" and c.get("side") == "BUY"]
+        self.assertEqual(len(limit_topup), 1,
+                         "Exactly one top-up order must be placed for the missing rung")
+
+        placed = limit_topup[0]
+        price = float(placed["price"])
+        qty = float(placed["quantity"])
+
+        # Price must be at rung-1 level (~497.5), NOT near rungs 2-5
+        self.assertAlmostEqual(price, 497.5, delta=0.1,
+                               msg=f"Top-up price should be ~497.5 (rung 1), got {price}")
+        for existing_price in (495.0, 492.5, 490.0, 487.5):
+            self.assertGreater(abs(price - existing_price), 0.1,
+                               f"Top-up price {price} too close to existing rung {existing_price}")
+
+        # Notional must clear minNotional
+        self.assertGreaterEqual(qty * price, 5.0 - 1e-9,
+                                f"Top-up notional {qty*price:.4f} below minNotional 5.0")
+
+        # Basket must track all 5 safety ids (4 original + 1 new)
+        self.assertEqual(len(b.safety_order_ids), 5,
+                         "basket must track all 5 safety order ids after top-up")
+
+    def test_reconcile_no_topup_when_all_rungs_present(self):
+        """When all 5 safety rungs are already open, no top-up order is placed."""
+        create_calls = []
+        ENTRY = 500.0
+        BASE_QTY = 0.1
+
+        class FakeClient:
+            def futures_position_information(self, symbol):
+                return [{"positionAmt": str(BASE_QTY), "entryPrice": str(ENTRY)}]
+
+            def futures_get_open_orders(self, symbol):
+                return [
+                    {"orderId": 201, "type": "TAKE_PROFIT_MARKET", "side": "SELL",
+                     "reduceOnly": True},
+                    {"orderId": 301, "type": "STOP_MARKET", "side": "SELL",
+                     "reduceOnly": True},
+                    {"orderId": 401, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "497.5"},
+                    {"orderId": 402, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "495.0"},
+                    {"orderId": 403, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "492.5"},
+                    {"orderId": 404, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "490.0"},
+                    {"orderId": 405, "type": "LIMIT", "side": "BUY",
+                     "reduceOnly": False, "price": "487.5"},
+                ]
+
+            def futures_get_open_algo_orders(self, symbol):
+                return []
+
+            def futures_create_order(self_, **kw):
+                create_calls.append(kw)
+                return {"orderId": 9999, "status": "NEW"}
+
+        gcfg = GlobalConfig(leverage=10, base_margin=5.0, max_dca_orders=5)
+        scfg = SymbolConfig("BNBUSDT", tp_pct=0.5, stop_pct=3.0)
+        cfg = BotConfig(symbols=[scfg], global_=gcfg, api_key="key", api_secret="secret")
+
+        bot = object.__new__(DcaBot)
+        bot.cfg = cfg
+        bot.dry_run = False
+        bot.g = gcfg
+        bot.client = FakeClient()
+        bot.baskets = {}
+        bot.strategies = {}
+        bot.last_candle_time = {}
+        bot.symbol_info_cache = {}
+        bot.lot_filter_cache = {
+            "BNBUSDT": {"stepSize": 0.01, "tickSize": 0.01, "minQty": 0.01, "minNotional": 5.0},
+        }
+        bot.last_trade = {}
+        bot.oracle = None
+
+        with self.assertLogs("bot", level="INFO"):
+            bot.reconcile_on_start()
+
+        self.assertIn("BNBUSDT", bot.baskets)
+        limit_topup = [c for c in create_calls
+                       if c.get("type") == "LIMIT" and c.get("side") == "BUY"]
+        self.assertEqual(len(limit_topup), 0,
+                         "No top-up when all 5 rungs already open")
+
+
 class SafetyMinNotionalRegressionTests(unittest.TestCase):
     """Regression: safety orders must never be sent below minNotional (-4164).
 
