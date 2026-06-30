@@ -8,17 +8,18 @@
 | Direction | **Long** |
 | Entry mode | **Red candle close** (enter on red, arm on green) |
 | Position model | **DCA** |
-| Price drop step | **0.50%** |
+| DCA orders | **5** (global) — TIAUSDT overrides with same value |
+| Price drop step | **0.30%** |
 | Step multiplier | **1.0** (linear spacing) |
 | Size multiplier | **1.1** (each safety order 1.1x previous) |
 | First order ratio | **0.96** (first safety = 0.96x base) |
 | Checkpoint exit | **Disabled** (DCA holds for TP; don't exit on first green) |
 | Leverage | **10x** |
-| Margin per trade | **$10** (adjust to risk tolerance) |
+| Margin per trade | **$2.50** ($20 capital, 8 trades max) |
 | Taker fee | 0.05% (assumed market orders) |
 | Slippage | 2 bps |
 
-> **Stop-loss: Optional.** DCA structure + TP exit already caps downside to ~$1.36 worst trade at 3% stop. Running without stop improves expectancy. Use 3% fixed if you want zero liquidation risk.
+> **Stop-loss: None.** DCA=5 + no stop maximizes expectancy. Losses capped by ladder structure. Worst backtested trade: -$1.28 (liquidation). Starting capital: **$20**.
 
 ## Optimized Per-Symbol Parameters (OOS-validated)
 

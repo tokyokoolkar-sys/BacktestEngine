@@ -56,6 +56,11 @@ class CheckpointStrategy:
         self._prior_high = 0.0
         self._saw_red = False
 
+    def flip_direction(self) -> None:
+        """Toggle between long and short (for dual_mode)."""
+        self.cfg.direction = "short" if self.cfg.direction == "long" else "long"
+        self.reset()
+
     def on_closed_bar(
         self,
         prev_row,   # pd.Series — the bar before `row`; may be None on the very first bar

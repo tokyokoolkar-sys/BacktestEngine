@@ -89,6 +89,7 @@ class SymbolConfig:
     tp_pct: float
     stop_pct: float
     active: bool = True
+    max_dca_orders: int | None = None       # override global max_dca_orders per symbol
 
 
 @dataclass
@@ -109,6 +110,9 @@ class GlobalConfig:
     risk_per_trade_pct: float = 0.0       # 0 = use fixed base_margin; >0 = % of balance
     trail_activate_pct: float = 1.0       # 0 = disabled, % above avg_entry to activate
     trail_buffer_pct: float = 0.3         # trail stop = highest_price * (1 - buffer/100)
+    entry_volume_filter: bool = False     # skip entry when volume > entry_volume_max_ratio × 24h avg
+    entry_volume_max_ratio: float = 2.5   # volume threshold
+    dual_mode: bool = False                # alternate long/short on each new entry
 
 
 @dataclass
@@ -212,29 +216,32 @@ class Basket:
     trail_stop_price: float | None = None
     trail_active_stop_order_id: int | None = None
     trail_stop_is_algo: bool = False
+    logged: bool = False           # True once this basket's close row is written — guards
+                                   # against re-logging if closure fires twice (e.g. a
+                                   # cancel raises before the basket is deleted)
 
 
 # ---------------------------------------------------------------------------
 # DCA notional ladder (mirrors engine.py helpers)
 # ---------------------------------------------------------------------------
 
-def _dca_total_ratio(gcfg: GlobalConfig) -> float:
+def _dca_total_ratio(gcfg: GlobalConfig, dca_n: int | None = None) -> float:
     r0 = gcfg.first_order_ratio
     m = gcfg.size_multiplier
     r = r0
     tr = 1.0
-    for _ in range(gcfg.max_dca_orders):
+    for _ in range(dca_n if dca_n is not None else gcfg.max_dca_orders):
         tr += r
         r *= m
     return tr
 
 
-def _dca_safety_notionals(gcfg: GlobalConfig, base_notional: float) -> list[float]:
+def _dca_safety_notionals(gcfg: GlobalConfig, base_notional: float, dca_n: int | None = None) -> list[float]:
     r0 = gcfg.first_order_ratio
     m = gcfg.size_multiplier
     out = []
     prev = base_notional * r0
-    for k in range(gcfg.max_dca_orders):
+    for k in range(dca_n if dca_n is not None else gcfg.max_dca_orders):
         if k == 0:
             out.append(prev)
         else:
@@ -243,12 +250,12 @@ def _dca_safety_notionals(gcfg: GlobalConfig, base_notional: float) -> list[floa
     return out
 
 
-def _dca_safety_prices(entry_price: float, gcfg: GlobalConfig) -> list[float]:
+def _dca_safety_prices(entry_price: float, gcfg: GlobalConfig, dca_n: int | None = None) -> list[float]:
     """Cumulative drop % → absolute price levels."""
     cum = 0.0
     step = gcfg.drop_step_pct
     prices = []
-    for k in range(gcfg.max_dca_orders):
+    for k in range(dca_n if dca_n is not None else gcfg.max_dca_orders):
         cum += step * (gcfg.step_multiplier ** k)
         prices.append(entry_price * (1.0 - cum / 100.0))
     return prices
@@ -268,13 +275,17 @@ def _symbol_info(client: BinanceClient, symbol: str) -> dict:
 
 
 def _lot_filter(sinfo: dict) -> dict:
-    """Extract LOT_SIZE filter and PRICE_FILTER from symbol info."""
+    """Extract LOT_SIZE, PRICE_FILTER, MIN_NOTIONAL from symbol info."""
     out = {}
     for f in sinfo["filters"]:
         if f["filterType"] == "LOT_SIZE":
             out.update({"minQty": float(f["minQty"]), "maxQty": float(f["maxQty"]), "stepSize": float(f["stepSize"])})
         if f["filterType"] == "PRICE_FILTER":
             out.update({"minPrice": float(f["minPrice"]), "maxPrice": float(f["maxPrice"]), "tickSize": float(f["tickSize"])})
+        if f["filterType"] == "MIN_NOTIONAL":
+            out["minNotional"] = float(f["notional"])
+    if "minNotional" not in out:
+        out["minNotional"] = 5.0  # default Binance minimum
     return out
 
 
@@ -325,6 +336,7 @@ class DcaBot:
                 checkpoint_mode="first_green",
                 position_model="single",
                 direction="long",
+                dual_mode=self.g.dual_mode,
             ))
             self.last_trade[sc.name] = None
 
@@ -424,6 +436,13 @@ class DcaBot:
         if active >= self.g.max_concurrent_baskets:
             logger.info("Max concurrent baskets (%d) reached. Waiting.", self.g.max_concurrent_baskets)
             return False
+        # Available balance — block new entries if can't cover one base order
+        if not self.dry_run:
+            bal = self._available_balance()
+            if bal < self.g.base_margin:
+                logger.info("Balance %.2f < base_margin %.2f. Waiting for recovery.",
+                            bal, self.g.base_margin)
+                return False
         return True
 
     # ------------------------------------------------------------------
@@ -463,6 +482,21 @@ class DcaBot:
                      symbol, action, float(latest[4]),
                      "yes" if float(latest[4]) > float(latest[1]) else "no")
         if action == "enter":
+            # Volume filter: skip entry during high-volume (panic) conditions
+            if self.g.entry_volume_filter:
+                try:
+                    # Mirror engine.py: trailing 24-bar MA *including* the current bar
+                    vols = [float(k[5]) for k in klines[-24:] if k[5]]
+                    if len(vols) >= 2:
+                        avg_vol = sum(vols) / len(vols)
+                        cur_vol = float(latest[5])
+                        vol_ratio = cur_vol / avg_vol if avg_vol > 0 else 1.0
+                        if vol_ratio >= self.g.entry_volume_max_ratio:
+                            logger.info("%s: VOLUME-FILTER — vol_ratio=%.2f ≥ %.1f, skipping entry",
+                                        symbol, vol_ratio, self.g.entry_volume_max_ratio)
+                            return None, klines
+                except Exception as e:
+                    logger.warning("%s: volume filter error: %s", symbol, e)
             return "enter", klines
         return None, klines
 
@@ -474,6 +508,9 @@ class DcaBot:
         """Place DCA basket for one symbol."""
         symbol = sc.name
         g = self.g
+
+        # Per-symbol DCA override: use symbol-level if set, fall back to global
+        dca_n = sc.max_dca_orders if sc.max_dca_orders is not None else g.max_dca_orders
 
         # Set leverage per-symbol before entry
         if not self.dry_run:
@@ -500,22 +537,40 @@ class DcaBot:
             effective_base = bal * g.risk_per_trade_pct
         else:
             effective_base = g.base_margin
-        tr = _dca_total_ratio(g)
+        tr = _dca_total_ratio(g, dca_n)
         base_notional = (effective_base * g.leverage) / tr
         base_qty = _round_qty(base_notional / entry_price_r, lf)
 
+        # Ensure minQty and minNotional
+        if not self.dry_run:
+            min_notional = lf.get("minNotional", 5.0)
+            if base_notional < min_notional or base_qty * entry_price_r < min_notional:
+                # Scale base_notional to meet minNotional
+                scaled_notional = max(base_notional, min_notional)
+                base_qty = _round_qty(scaled_notional / entry_price_r, lf)
+                while base_qty * entry_price_r < min_notional and base_qty > 0:
+                    step = lf.get("stepSize", 0.001)
+                    base_qty = _round_qty(base_qty + step, lf)
+                base_notional = base_qty * entry_price_r
+                effective_base = base_notional * tr / g.leverage
+                # Scaling up to minNotional pushes total margin (and stop-loss $ risk)
+                # ABOVE the configured base_margin. Backtest no longer maps 1:1. Loud
+                # on purpose — see the deliberate "never trade above risk budget" rule.
+                inflation = effective_base / g.base_margin if g.base_margin > 0 else 0.0
+                logger.warning(
+                    "%s: RISK-SCALED to meet minNotional — effective_margin=%.2f$ "
+                    "= %.2fx configured base_margin %.2f$ (stop-loss $risk inflated)",
+                    symbol, effective_base, inflation, g.base_margin)
+
         if base_qty < lf["minQty"]:
-            # Configured base_margin can't meet exchange minQty at current price.
-            # Skip rather than auto-scale up: never trade a symbol above the configured
-            # risk budget (auto-scaling silently inflates position + stop-loss $ risk).
             min_margin = (lf["minQty"] * entry_price_r) * tr / g.leverage
             logger.warning(
                 "%s: SKIP — minQty %.6f needs ~%.2f$ margin > configured base_margin %.2f$",
                 symbol, lf["minQty"], min_margin, g.base_margin)
             return
 
-        safety_notionals = _dca_safety_notionals(g, base_notional)
-        safety_prices = _dca_safety_prices(entry_price_r, g)
+        safety_notionals = _dca_safety_notionals(g, base_notional, dca_n)
+        safety_prices = _dca_safety_prices(entry_price_r, g, dca_n)
 
         entry_fee = base_notional * g.fee_taker
         total_margin = base_notional * tr / g.leverage
@@ -536,7 +591,7 @@ class DcaBot:
             basket.state = "active"
             basket.size_base = base_qty
             basket.base_order_id = 0
-            for i in range(g.max_dca_orders):
+            for i in range(dca_n):
                 sq = _round_qty(safety_notionals[i] / safety_prices[i], lf)
                 logger.info("  safety %d: qty=%s @ %.4f", i + 1, sq, safety_prices[i])
             tp_price = entry_price_r * (1.0 + sc.tp_pct / 100.0)
@@ -569,7 +624,7 @@ class DcaBot:
 
         # 2. Safety limit orders — per-order try/except so a single failure does
         # not abandon the registered basket or prevent TP/stop from being placed.
-        for i in range(g.max_dca_orders):
+        for i in range(dca_n):
             sq = _round_qty(safety_notionals[i] / safety_prices[i], lf)
             sp = _round_price(safety_prices[i], lf)
             try:
@@ -824,29 +879,32 @@ class DcaBot:
                 net_pnl = gross_pnl - (basket.total_fees + exit_fee)
                 pnl_pct = net_pnl / basket.total_margin * 100 if basket.total_margin > 0 else 0.0
 
-                _write_trade({
-                    "symbol": symbol,
-                    "entry_time": basket.entry_time or "",
-                    "exit_time": datetime.now(timezone.utc).isoformat(),
-                    "entry_price": basket.entry_price or 0.0,
-                    "exit_price": exit_price,
-                    "gross_pnl": round(gross_pnl, 6),
-                    "fees": round(basket.total_fees + exit_fee, 6),
-                    "funding": 0.0,
-                    "net_pnl": round(net_pnl, 6),
-                    "pnl_pct": round(pnl_pct, 4),
-                    "exit_reason": exit_reason,
-                    "n_safety_filled": basket.n_safety_filled,
-                    "base_margin": basket.total_margin,
-                    "leverage": self.g.leverage,
-                })
-
-                logger.info("%s: CLOSED  reason=%s  gross=%.4f  net=%.4f  pnl=%.2f%%",
-                             symbol, exit_reason, gross_pnl, net_pnl, pnl_pct)
+                if not basket.logged:
+                    basket.logged = True
+                    _write_trade({
+                        "symbol": symbol,
+                        "entry_time": basket.entry_time or "",
+                        "exit_time": datetime.now(timezone.utc).isoformat(),
+                        "entry_price": basket.entry_price or 0.0,
+                        "exit_price": exit_price,
+                        "gross_pnl": round(gross_pnl, 6),
+                        "fees": round(basket.total_fees + exit_fee, 6),
+                        "funding": 0.0,
+                        "net_pnl": round(net_pnl, 6),
+                        "pnl_pct": round(pnl_pct, 4),
+                        "exit_reason": exit_reason,
+                        "n_safety_filled": basket.n_safety_filled,
+                        "base_margin": basket.total_margin,
+                        "leverage": self.g.leverage,
+                    })
+                    logger.info("%s: CLOSED  reason=%s  gross=%.4f  net=%.4f  pnl=%.2f%%",
+                                 symbol, exit_reason, gross_pnl, net_pnl, pnl_pct)
 
                 basket.state = "closing"
                 self._cancel_remaining_orders(basket)
                 self.strategies[symbol].reset()
+                if self.g.dual_mode:
+                    self.strategies[symbol].flip_direction()
                 del self.baskets[symbol]
                 self._on_trade_closed(symbol, {
                     "net_pnl": net_pnl, "exit_reason": exit_reason,
@@ -862,29 +920,34 @@ class DcaBot:
                     gross_pnl, fees, funding = realized
                     net_pnl = gross_pnl - fees + funding
                     pnl_pct = net_pnl / basket.total_margin * 100 if basket.total_margin > 0 else 0.0
-                    _write_trade({
-                        "symbol": symbol,
-                        "entry_time": basket.entry_time or "",
-                        "exit_time": datetime.now(timezone.utc).isoformat(),
-                        "entry_price": basket.entry_price or 0.0,
-                        "exit_price": 0.0,
-                        "gross_pnl": round(gross_pnl, 6),
-                        "fees": round(fees, 6),
-                        "funding": round(funding, 6),
-                        "net_pnl": round(net_pnl, 6),
-                        "pnl_pct": round(pnl_pct, 4),
-                        "exit_reason": "manual",
-                        "n_safety_filled": basket.n_safety_filled,
-                        "base_margin": basket.total_margin,
-                        "leverage": self.g.leverage,
-                    })
-                    logger.info("%s: CLOSED (manual)  net=%.4f  pnl=%.2f%%  (reconstructed)",
-                                 symbol, net_pnl, pnl_pct)
+                    exit_reason = "take_profit" if net_pnl >= 0 else "stop"
+                    if not basket.logged:
+                        basket.logged = True
+                        _write_trade({
+                            "symbol": symbol,
+                            "entry_time": basket.entry_time or "",
+                            "exit_time": datetime.now(timezone.utc).isoformat(),
+                            "entry_price": basket.entry_price or 0.0,
+                            "exit_price": 0.0,
+                            "gross_pnl": round(gross_pnl, 6),
+                            "fees": round(fees, 6),
+                            "funding": round(funding, 6),
+                            "net_pnl": round(net_pnl, 6),
+                            "pnl_pct": round(pnl_pct, 4),
+                            "exit_reason": exit_reason,
+                            "n_safety_filled": basket.n_safety_filled,
+                            "base_margin": basket.total_margin,
+                            "leverage": self.g.leverage,
+                        })
+                        logger.info("%s: CLOSED (reconstructed)  reason=%s  net=%.4f  pnl=%.2f%%",
+                                     symbol, exit_reason, net_pnl, pnl_pct)
                     self._cancel_remaining_orders(basket)
                     self.strategies[symbol].reset()
+                    if self.g.dual_mode:
+                        self.strategies[symbol].flip_direction()
                     del self.baskets[symbol]
                     self._on_trade_closed(symbol, {
-                        "net_pnl": net_pnl, "exit_reason": "manual",
+                        "net_pnl": net_pnl, "exit_reason": exit_reason,
                         "n_safety_filled": basket.n_safety_filled, "pnl_pct": pnl_pct,
                     })
                 else:
@@ -892,6 +955,8 @@ class DcaBot:
                                    "Resetting without a trade-log row.", symbol)
                     self._cancel_remaining_orders(basket)
                     self.strategies[symbol].reset()
+                    if self.g.dual_mode:
+                        self.strategies[symbol].flip_direction()
                     del self.baskets[symbol]
 
     def _reconstruct_realized_pnl(self, basket: Basket):
@@ -1221,6 +1286,10 @@ class DcaBot:
                             upnl = float(pos[0].get("unRealizedProfit", 0) or 0)
                     except Exception:
                         pass  # leave zeros; dashboard falls back to live exchange read
+                direction = "long"
+                strat = self.strategies.get(symbol)
+                if strat is not None:
+                    direction = strat.cfg.direction
                 baskets.append({
                     "symbol": symbol,
                     "avg_entry": basket.avg_entry or 0.0,
@@ -1229,13 +1298,16 @@ class DcaBot:
                     "margin": round(basket.total_margin, 2),
                     "liquidation": liq,
                     "state": basket.state,
+                    "direction": direction,
                     "entry_time": basket.entry_time or "",
                     "dca_levels": [],
                 })
 
+            direction = "dual" if self.g.dual_mode else "long"
             status = {
                 "bot_alive": True,
                 "mode": "auto",
+                "direction": direction,
                 "oracle": False,
                 "balance": round(bal, 2),
                 "active_baskets": len(self.baskets),
@@ -1408,10 +1480,11 @@ class DcaBot:
         base_notional_est = self.g.base_margin * self.g.leverage
         base_qty_est = base_notional_est / avg_entry if avg_entry > 0 else 0.0
         # Excess size beyond the base order implies safety fills
+        dca_max = scfg.max_dca_orders if scfg.max_dca_orders is not None else self.g.max_dca_orders
         excess = size_base - base_qty_est
         if excess > 0 and base_qty_est > 0:
             n_safety_filled = max(0, min(
-                self.g.max_dca_orders,
+                dca_max,
                 round(excess / (base_qty_est * self.g.first_order_ratio)),
             ))
         else:
@@ -1519,10 +1592,12 @@ class DcaBot:
 
         if not self.dry_run:
             bal = self._available_balance()
-            logger.info("Available USDT: %.2f", bal)
-            if bal < 10:
-                logger.error("Balance < 10 USDT. Refusing to start.")
-                return
+            logger.info("Available USDT: %.2f (need at least %.2f for one entry)",
+                         bal, self.g.base_margin)
+            if bal < self.g.base_margin:
+                logger.warning("Balance %.2f < base_margin %.2f. Starting in recovery "
+                               "mode — managing existing positions, no new entries.",
+                               bal, self.g.base_margin)
 
         self.reconcile_on_start()
 

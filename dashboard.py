@@ -1435,6 +1435,20 @@ tr:hover td { background: var(--bg-raised); }
   border: 1px solid oklch(0.68 0.22 22 / 0.2);
   color: var(--loss);
 }
+.badge-long {
+  font-size:0.65rem;
+  padding:1px 5px;
+  border-radius:4px;
+  background:oklch(0.35 0.08 160 / 0.25);
+  border:1px solid oklch(0.55 0.15 160 / 0.3);
+}
+.badge-short {
+  font-size:0.65rem;
+  padding:1px 5px;
+  border-radius:4px;
+  background:oklch(0.35 0.08 20 / 0.25);
+  border:1px solid oklch(0.55 0.15 20 / 0.3);
+}
 .badge-active {
   background: var(--accent-dim);
   border: 1px solid oklch(0.72 0.17 212 / 0.2);
@@ -1607,11 +1621,11 @@ tr:hover td { background: var(--bg-raised); }
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Symbol</th><th>Entry@</th><th>Avg</th><th>Mark</th>
+          <th>Symbol</th><th>Dir</th><th>Entry@</th><th>Avg</th><th>Mark</th>
           <th>Δ Entry</th><th>DCA Levels</th><th>Float PnL</th><th>Status</th>
         </tr></thead>
         <tbody id="baskets-body">
-          <tr><td colspan="8"><div class="empty-state">NO ACTIVE POSITIONS</div></td></tr>
+          <tr><td colspan="9"><div class="empty-state">NO ACTIVE POSITIONS</div></td></tr>
         </tbody>
       </table>
     </div>
@@ -1804,8 +1818,12 @@ async function refresh() {
         const ets = b.entry_time && b.entry_time.length >= 19 ? b.entry_time.substr(11,8) : '—';
         const distCls = dist===null?'':(dist>0?'text-profit':'text-loss');
         const flCls = flPnl===null?'':(flPnl>=0?'text-profit':'text-loss');
+        const dir = b.direction || 'long';
+        const dirIcon = dir === 'short' ? '🔻' : '🟢';
+        const dirBadge = `<span class="badge-${dir}">${dirIcon} ${dir.toUpperCase()}</span>`;
         return `<tr>
           <td>${b.symbol||''}</td>
+          <td>${dirBadge}</td>
           <td>${ets}</td>
           <td>${avg.toFixed(4)}</td>
           <td class="${distCls}">${cur?cur.toFixed(4):'—'}</td>
@@ -1816,7 +1834,7 @@ async function refresh() {
         </tr>`;
       }).join('');
     } else {
-      bb.innerHTML = '<tr><td colspan="8"><div class="empty-state">NO ACTIVE POSITIONS</div></td></tr>';
+      bb.innerHTML = '<tr><td colspan="9"><div class="empty-state">NO ACTIVE POSITIONS</div></td></tr>';
     }
 
   } catch(e) { console.error('refresh error', e); }
@@ -2037,23 +2055,32 @@ def _stop_proc(pidfile: Path, label: str):
 
 
 def _start_auto():
-    """Launch bot.py --loop in a detached subprocess."""
-    subprocess.Popen(
+    """Launch bot.py --loop in a detached subprocess.
+
+    Writes bot.pid immediately from the spawned pid. bot.py itself only writes
+    the pidfile late in startup (after client init + reconcile), so without this
+    the _proc_running guard stays False for several seconds — long enough for a
+    second Start click to launch a duplicate bot that double-adopts positions.
+    """
+    proc = subprocess.Popen(
         [sys.executable, str(_HERE / "bot.py"), "--loop"],
         cwd=str(_HERE),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    _BOT_PID.write_text(str(proc.pid))
 
 
 def _start_manual():
-    """Launch trade.py --loop in a detached subprocess."""
-    subprocess.Popen(
+    """Launch trade.py --loop in a detached subprocess. Writes trade.pid at
+    launch to close the same start-race window as _start_auto()."""
+    proc = subprocess.Popen(
         [sys.executable, str(_HERE / "trade.py"), "--loop"],
         cwd=str(_HERE),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    _TRADE_PID.write_text(str(proc.pid))
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,7 @@ class SignalRegressionTests(unittest.TestCase):
     def test_check_signal_uses_last_closed_candle_not_live_candle(self):
         bot = object.__new__(DcaBot)
         bot.dry_run = False
+        bot.g = GlobalConfig()
         bot.last_candle_time = {}
         bot.strategies = {"BTCUSDT": __import__("strategy").CheckpointStrategy(__import__("config").StrategyConfig(
             entry_mode="red_dip",

@@ -89,8 +89,12 @@ Modeling assumptions (every one enumerated)
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from config import (
     BacktestConfig,
@@ -239,10 +243,18 @@ def run_backtest(
     lows   = klines["low"].to_numpy(dtype=np.float64)
     closes = klines["close"].to_numpy(dtype=np.float64)
     opens  = klines["open"].to_numpy(dtype=np.float64)
+    volumes = klines.get("volume", pd.Series([0.0] * len(klines))).to_numpy(dtype=np.float64)
     times  = klines["open_time"].to_numpy(dtype="int64")  # ns since epoch
     ts     = klines["open_time"].to_list()                # list[pd.Timestamp] for O(1) access
 
     atr_arr = _compute_atr(highs, lows, closes, scfg.atr_period)
+
+    # --- Pre-compute volume MA24 for entry volume filter ---
+    if scfg.entry_volume_filter:
+        vol_ma24 = pd.Series(volumes).rolling(24).mean().to_numpy(dtype=np.float64)
+        vol_ratio = np.divide(volumes, vol_ma24, out=np.full_like(volumes, 1.0), where=vol_ma24 > 0)
+    else:
+        vol_ratio = np.ones_like(volumes)  # always < max, never blocks
 
     # --- Pre-index funding ---
     fund_times = funding["funding_time"].to_numpy(dtype="int64")
@@ -420,6 +432,9 @@ def run_backtest(
                 running_equity += closed_trade.net_pnl
                 equity_curve.append((closed_trade.exit_time, running_equity))
                 in_position = False
+                # Dual-mode: flip direction after each completed trade
+                if scfg.dual_mode:
+                    strategy.flip_direction()
                 # Strategy syncs its state on the NEXT call to on_closed_bar via the
                 # guard: `if not in_position and self._state == self._POS` — no explicit
                 # call needed here; we skip the rest of this iteration.
@@ -469,8 +484,16 @@ def run_backtest(
             running_equity += t.net_pnl
             equity_curve.append((t.exit_time, running_equity))
             in_position = False
+            if scfg.dual_mode:
+                strategy.flip_direction()
 
         elif action == "enter" and not in_position:
+            # Volume filter: skip entry during high-volume (panic) conditions
+            if scfg.entry_volume_filter and vol_ratio[i] >= scfg.entry_volume_max_ratio:
+                logger.debug("%s: SKIP entry — vol_ratio %.2f ≥ %.2f",
+                             cfg.symbol, vol_ratio[i], scfg.entry_volume_max_ratio)
+                continue
+
             # Fill at next bar open (bar i+1) if available
             if i + 1 < n:
                 fill_price = _slip_exit(opens[i + 1], slip) if _short else _slip_entry(opens[i + 1], slip)
@@ -554,6 +577,8 @@ def run_backtest(
         trades.append(t)
         running_equity += t.net_pnl
         equity_curve.append((t.exit_time, running_equity))
+        if scfg.dual_mode:
+            strategy.flip_direction()
 
     return Result(trades=trades, equity_curve=equity_curve, cfg=cfg)
 

@@ -20,13 +20,14 @@ symbols:
   stop_pct: 3.0
   active: true
 - name: TIAUSDT
-  tp_pct: 0.5
+  tp_pct: 0.8
   stop_pct: 3.0
   active: true
+  max_dca_orders: 5
 - name: FILUSDT
   tp_pct: 0.5
   stop_pct: 3.0
-  active: false
+  active: true
 - name: OPUSDT
   tp_pct: 0.5
   stop_pct: 3.0
@@ -34,7 +35,7 @@ symbols:
 - name: ARBUSDT
   tp_pct: 0.5
   stop_pct: 3.0
-  active: false
+  active: true
 - name: APTUSDT
   tp_pct: 0.5
   stop_pct: 3.0
@@ -87,20 +88,16 @@ symbols:
   tp_pct: 0.5
   stop_pct: 3.0
   active: false
-- name: BCHUSDT
-  tp_pct: 0.5
-  stop_pct: 3.0
-  active: false
 global:
   leverage: 10
   base_margin: 2.5
   dca_margin: 2.5
-  max_dca_orders: 3
+  max_dca_orders: 5
   drop_step_pct: 0.3
   step_multiplier: 1.0
   size_multiplier: 1.1
   first_order_ratio: 0.96
-  max_concurrent_baskets: 5
+  max_concurrent_baskets: 6
   daily_loss_limit: 5.0
   fee_taker: 0.0005
   fee_maker: 0.0002

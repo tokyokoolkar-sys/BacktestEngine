@@ -58,6 +58,18 @@ class StrategyConfig:
     # "long"         — enter on red close, exit on green close
     # "short"        — enter on green close, exit on red close (mirror)
 
+    dual_mode: bool = False
+    # False          — trade in `direction` only
+    # True           — alternate between long and short on each new entry
+    #                 (first entry uses `direction`, then flips each trade)
+
+    entry_volume_filter: bool = False
+    # False          — no volume check
+    # True           — skip entry if current bar volume > entry_volume_max_ratio × 24h MA
+
+    entry_volume_max_ratio: float = 2.5
+    # Volume ratio threshold. Entry skipped when vol / 24h_MA_vol >= this value.
+
 
 @dataclass
 class ExecConfig:
