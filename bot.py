@@ -601,6 +601,7 @@ class DcaBot:
                 logger.info("  Trail: activate at +%.1f%%, buffer %.1f%%",
                             g.trail_activate_pct, g.trail_buffer_pct)
             self.baskets[symbol] = basket
+            self._write_status_json()
             return
 
         # ── Place orders on Binance ──
@@ -686,6 +687,7 @@ class DcaBot:
         except Exception as e:
             logger.warning("%s: Stop order failed: %s", symbol, e)
         logger.info("  Stop: %.4f (id=%s)", stop_price, basket.stop_order_id)
+        self._write_status_json()
 
     # ------------------------------------------------------------------
     # Manage existing baskets
@@ -1610,6 +1612,7 @@ class DcaBot:
                                bal, self.g.base_margin)
 
         self.reconcile_on_start()
+        self._write_status_json()
 
         # Write pidfile
         bot_pid_path = _HERE / "bot.pid"
