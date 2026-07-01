@@ -63,6 +63,19 @@ class StrategyConfig:
     # True           — alternate between long and short on each new entry
     #                 (first entry uses `direction`, then flips each trade)
 
+    drown_flip: bool = False
+    # False          — no drown-flip
+    # True           — while in position, if price moves drown_flip_pct % against
+    #                 avg_entry, force-close and open the opposite side (rescue flip)
+
+    drown_flip_pct: Optional[float] = None
+    # Raw price move % from avg_entry that triggers a flip. Long flips when
+    # low <= avg_entry*(1 - pct/100); short when high >= avg_entry*(1 + pct/100).
+    # Must be < liq distance (100*(1/lev - maint)) or liquidation fires first.
+
+    drown_flip_cooldown_bars: int = 5
+    # Min bars between flips; guards against oscillation/fee-bleed in chop.
+
     entry_volume_filter: bool = False
     # False          — no volume check
     # True           — skip entry if current bar volume > entry_volume_max_ratio × 24h MA

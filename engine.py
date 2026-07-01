@@ -293,6 +293,10 @@ def run_backtest(
     next_safety_idx: int = 0            # index into safety orders (0-based)
     n_safety_filled: int = 0
 
+    # Drown-flip state
+    last_flip_bar: int = -10**9         # bar index of the most recent flip (cooldown ref)
+    forced_entry: bool = False          # set when a drown-flip forces an entry this bar
+
     n = len(klines)
 
     for i in range(1, n):
@@ -445,10 +449,57 @@ def run_backtest(
                 # call needed here; we skip the rest of this iteration.
                 continue  # skip strategy signal for this bar (forced exit owns the bar)
 
+            # e. Drown-flip: no liq/stop/TP fired this bar (else we'd have continued).
+            # If price has moved drown_flip_pct against avg_entry, close this side and
+            # open the opposite side at the NEXT bar open (falls through to the enter
+            # block below — no continue — so the flip entry obeys no-lookahead).
+            if (scfg.drown_flip and scfg.drown_flip_pct
+                    and (i - last_flip_bar) >= scfg.drown_flip_cooldown_bars):
+                if _short:
+                    drown_trig = avg_entry * (1.0 + scfg.drown_flip_pct / 100.0)
+                    drown_hit = bar_high >= drown_trig
+                else:
+                    drown_trig = avg_entry * (1.0 - scfg.drown_flip_pct / 100.0)
+                    drown_hit = bar_low <= drown_trig
+                if drown_hit:
+                    df_fill = _slip_entry(drown_trig, slip) if _short else _slip_exit(drown_trig, slip)
+                    gross = (avg_entry - df_fill if _short else df_fill - avg_entry) * size_base
+                    exit_fee = total_notional * ecfg.taker_fee
+                    _rate_sum = _funding_in_window(fund_times, fund_rates, entry_time.value, times[i])
+                    fund_paid = (-_rate_sum if _short else _rate_sum) * total_notional
+                    net = max(-total_margin, gross - (total_fees + exit_fee) - fund_paid)
+                    df_trade = Trade(
+                        entry_time=entry_time,
+                        exit_time=ts[i],
+                        entry_price=entry_price,
+                        exit_price=df_fill,
+                        size_base=size_base,
+                        gross_pnl=gross,
+                        fees=total_fees + exit_fee,
+                        funding=fund_paid,
+                        net_pnl=net,
+                        pnl_pct=net / ecfg.margin_usdt,
+                        exit_reason="drown_flip",
+                        n_safety_filled=n_safety_filled,
+                    )
+                    trades.append(df_trade)
+                    running_equity += df_trade.net_pnl
+                    equity_curve.append((df_trade.exit_time, running_equity))
+                    in_position = False
+                    strategy.flip_direction()
+                    _short = scfg.direction == "short"
+                    last_flip_bar = i
+                    forced_entry = True
+                    # NO continue: fall through to the enter block, which fills the
+                    # opposite side at bar i+1 open (same rule as every other entry).
+
         # ------------------------------------------------------------------
         # 2. Strategy signal on closed bar (row = bar i)
         # ------------------------------------------------------------------
-        action = strategy.on_closed_bar(prev_row, row, in_position=in_position)
+        if forced_entry:
+            action = "enter"   # override the signal; open the flipped side
+        else:
+            action = strategy.on_closed_bar(prev_row, row, in_position=in_position)
 
         # ------------------------------------------------------------------
         # 3. Act on strategy signal at NEXT bar open (bar i+1)
@@ -494,8 +545,11 @@ def run_backtest(
                 _short = scfg.direction == "short"
 
         elif action == "enter" and not in_position:
-            # Volume filter: skip entry during high-volume (panic) conditions
-            if scfg.entry_volume_filter and vol_ratio[i] >= scfg.entry_volume_max_ratio:
+            # Volume filter: skip entry during high-volume (panic) conditions.
+            # A forced flip-entry (drown rescue) bypasses the filter — the decision
+            # to be in the opposite side was already made when the long drowned.
+            if (not forced_entry and scfg.entry_volume_filter
+                    and vol_ratio[i] >= scfg.entry_volume_max_ratio):
                 logger.debug("%s: SKIP entry — vol_ratio %.2f ≥ %.2f",
                              cfg.symbol, vol_ratio[i], scfg.entry_volume_max_ratio)
                 continue
@@ -506,6 +560,7 @@ def run_backtest(
                 fill_time  = ts[i + 1]
             else:
                 # Can't enter on the very last bar — skip
+                forced_entry = False
                 continue
 
             entry_time  = fill_time
@@ -550,6 +605,13 @@ def run_backtest(
                 liq_price = avg_entry * (1.0 - 1.0 / ecfg.leverage + ecfg.maint_margin_rate)
 
             in_position = True
+
+            # Forced flip-entry: the engine opened this side directly (no signal),
+            # so sync the strategy machine into IN_POSITION, else next bar it would
+            # re-arm while actually holding a position.
+            if forced_entry:
+                strategy.force_position(prev_row["high"] if prev_row is not None else row["high"])
+                forced_entry = False
 
     # ------------------------------------------------------------------
     # 4. End-of-data: close any open position at last bar close

@@ -61,6 +61,18 @@ class CheckpointStrategy:
         self.cfg.direction = "short" if self.cfg.direction == "long" else "long"
         self.reset()
 
+    def force_position(self, prior_high: float) -> None:
+        """Put the machine into IN_POSITION for an engine-forced entry (no signal).
+
+        Used by the drown-flip: the engine opens the opposite side directly, so the
+        strategy must reflect the held position — otherwise the next bar it would
+        re-enter _handle_armed while actually in a position.
+        """
+        self._state = self._POS
+        self._saw_red = False
+        self._green_count = 0
+        self._prior_high = prior_high
+
     def on_closed_bar(
         self,
         prev_row,   # pd.Series — the bar before `row`; may be None on the very first bar

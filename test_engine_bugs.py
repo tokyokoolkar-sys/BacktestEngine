@@ -331,3 +331,99 @@ class TestCheckpointExitGateRouting:
         assert strat._state == strat._ARMED, (
             f"After one green in FLAT_LOCKED with gate='one', should be ARMED; got {strat._state}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Feature: drown-flip (long that drowns force-closes and flips to short)
+# ---------------------------------------------------------------------------
+
+def _drown_cfg(flip_pct: float, cooldown: int, leverage: int) -> BacktestConfig:
+    """Single-model long with drown-flip on; zero slippage/fees for exact math."""
+    return BacktestConfig(
+        strategy=StrategyConfig(
+            direction="long",
+            position_model="single",
+            entry_mode="red_dip",
+            checkpoint_mode="first_green",
+            green_gate="off",
+            stop_mode="none",
+            drown_flip=True,
+            drown_flip_pct=flip_pct,
+            drown_flip_cooldown_bars=cooldown,
+        ),
+        dca=DCAConfig(),
+        exec=ExecConfig(
+            leverage=leverage,
+            margin_usdt=10.0,
+            taker_fee=0.0,
+            slippage_bps=0.0,
+            maint_margin_rate=0.05,
+        ),
+    )
+
+
+class TestDrownFlip:
+    def test_flip_is_no_lookahead(self):
+        """Long drowns on bar i; the short entry must fill at bar i+1 open.
+
+        leverage=2 → liq distance = 45%, well beyond the 5% drown trigger, so the
+        flip fires (not liquidation). Entry at 100, drown trigger = 95.
+        """
+        cfg = _drown_cfg(flip_pct=5.0, cooldown=1, leverage=2)
+        klines = _make_klines([
+            (100.0, 101.0, 99.0, 100.5),  # bar 0 — prev_row
+            (100.0, 100.5, 99.0, 99.5),   # bar 1 — red → enter long, fills bar 2 open
+            (100.0, 100.0, 94.0, 96.0),   # bar 2 — entry=100; low=94 <= 95 trigger → drown flip
+            (96.0, 97.0, 95.0, 96.5),     # bar 3 — short entry fills here at open=96
+            (96.5, 97.0, 96.0, 96.8),     # bar 4 — buffer (short holds)
+        ])
+        result = run_backtest(klines, _empty_funding(), cfg)
+
+        drown = [t for t in result.trades if t.exit_reason == "drown_flip"]
+        assert len(drown) == 1, f"expected 1 drown_flip; got {[t.exit_reason for t in result.trades]}"
+        d = drown[0]
+        assert d.exit_price < d.entry_price, "long drown must exit below entry (a loss)"
+
+        idx = result.trades.index(d)
+        assert idx + 1 < len(result.trades), "a short trade must follow the flip"
+        short_t = result.trades[idx + 1]
+        # No-lookahead: short filled at bar 3 open = 96.0 (the bar AFTER the drown bar)
+        assert short_t.entry_price == 96.0, (
+            f"short entry must fill at next-bar open (96.0), got {short_t.entry_price} — lookahead leak"
+        )
+
+    def test_cooldown_blocks_second_flip(self):
+        """Two adverse legs within cooldown_bars → only ONE flip fires."""
+        cfg = _drown_cfg(flip_pct=5.0, cooldown=5, leverage=2)
+        klines = _make_klines([
+            (100.0, 101.0, 99.0, 100.5),  # bar 0
+            (100.0, 100.5, 99.0, 99.5),   # bar 1 — enter long, fills bar 2
+            (100.0, 100.0, 94.0, 96.0),   # bar 2 — drown flip → short at bar 3 open=96
+            (96.0, 110.0, 95.0, 109.0),   # bar 3 — short adverse: high=110 >= 96*1.05, but cooldown blocks
+            (109.0, 110.0, 108.0, 109.0), # bar 4 — still within cooldown
+        ])
+        result = run_backtest(klines, _empty_funding(), cfg)
+        drown = [t for t in result.trades if t.exit_reason == "drown_flip"]
+        assert len(drown) == 1, (
+            f"cooldown must block the 2nd flip; got {len(drown)} drown_flip trades"
+        )
+
+    def test_liquidation_takes_precedence(self):
+        """drown_flip_pct above the liq distance → liquidation fires, no drown_flip.
+
+        leverage=10 → liq distance = 5%; drown_flip_pct=8% sits beyond liq, so as
+        price falls it crosses the liq level (95) before the drown level (92).
+        """
+        cfg = _drown_cfg(flip_pct=8.0, cooldown=1, leverage=10)
+        klines = _make_klines([
+            (100.0, 101.0, 99.0, 100.5),  # bar 0
+            (100.0, 100.5, 99.0, 99.5),   # bar 1 — enter long, fills bar 2
+            (100.0, 100.0, 90.0, 92.0),   # bar 2 — low=90 crosses liq(95) and drown(92); liq wins
+            (92.0, 93.0, 91.0, 92.5),     # bar 3 — buffer
+        ])
+        result = run_backtest(klines, _empty_funding(), cfg)
+        reasons = [t.exit_reason for t in result.trades]
+        assert "liquidation" in reasons, f"expected a liquidation; got {reasons}"
+        assert "drown_flip" not in reasons, (
+            f"drown_flip must not fire when liq is crossed first; got {reasons}"
+        )
