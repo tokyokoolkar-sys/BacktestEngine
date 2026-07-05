@@ -11,80 +11,81 @@ api:
 
 symbols:
   # Elite RR — near-zero downside per loss
-  - name: AIAUSDT         # RR=25.17  cushion=90%  N=46   worst=-$0.005
+  # body_pct=2.0 — RR collapses at 1.5, PnL drops
+  - name: JELLYJELLYUSDT  # RR=14.25→0.58  PnL $2.19→$1.15 at 1.5
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
     body_pct: 2.0
     active: true
-  - name: JELLYJELLYUSDT  # RR=14.25  cushion=75%  N=32   worst=-$0.016
+  - name: TACUSDT          # RR=7.15→0.35  PnL $3.35→$2.79 at 1.5
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
     body_pct: 2.0
     active: true
-  - name: CTRUSDT          # RR=7.14   cushion=80%  N=37   worst=-$0.023
+  - name: CAPUSDT          # RR=5.38→1.31  keep quality
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
     body_pct: 2.0
     active: true
-  - name: TACUSDT          # RR=7.15   cushion=79%  N=45   worst=-$0.020
+  # body_pct=1.5 — more trades, PnL improves
+  - name: AIAUSDT         # PnL $2.74→$4.06  +$1.32
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
-  - name: OPGUSDT          # RR=6.88   cushion=80%  N=42   worst=-$0.019
+  - name: GWEIUSDT         # PnL $4.60→$6.59  +$1.99
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
-  - name: GWEIUSDT         # RR=5.69   cushion=69%  N=62   worst=-$0.052
+  - name: OUSDT            # PnL $2.45→$5.08  +$2.63
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
-  - name: CAPUSDT          # RR=5.38   cushion=72%  N=25   worst=-$0.034
+  - name: MYXUSDT          # PnL $5.14→$7.77  +$2.63
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
-  - name: OUSDT            # RR=2.38   cushion=62%  N=35   worst=-$0.046
+  - name: OPGUSDT          # PnL $2.16→$3.11  +$0.95
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
-  - name: MYXUSDT          # RR=2.30   cushion=59%  N=94   worst=-$0.171
+  - name: CTRUSDT          # PnL $1.70→$2.89  +$1.19
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
-  # Volume anchor
-  - name: PORTALUSDT       # RR=0.74   cushion=37%  N=133  worst=-$0.557
+  - name: PORTALUSDT       # PnL $10.17→$13.66  +$3.49
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
-    body_pct: 2.0
+    body_pct: 1.5
     active: true
 
 global:
-  leverage: 9
+  leverage: 10
   base_margin: 2.5            # $/basket first order
   dca_margin: 2.5             # per safety order
   max_dca_orders: 4
@@ -96,7 +97,7 @@ global:
   daily_loss_limit: 3.5
   fee_taker: 0.0005
   fee_maker: 0.0002
-  poll_interval_sec: 60
+  poll_interval_sec: 30
   risk_per_trade_pct: 0.0
   trail_activate_pct: 0.75
   trail_buffer_pct: 0.45
