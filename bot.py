@@ -105,6 +105,7 @@ class SymbolConfig:
     stop_pct: float
     active: bool = True
     max_dca_orders: int | None = None       # override global max_dca_orders per symbol
+    direction: str = "long"                 # per-symbol entry direction: "long" | "short"
 
 
 @dataclass
@@ -365,7 +366,7 @@ class DcaBot:
                 stop_mode="none",
                 checkpoint_mode="first_green",
                 position_model="single",
-                direction="long",
+                direction=sc.direction,
                 dual_mode=self.g.dual_mode,
             ))
             self.last_trade[sc.name] = None
