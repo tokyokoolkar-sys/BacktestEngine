@@ -1,0 +1,39 @@
+# DCA scalp config — LABUSDT long, single-symbol, $32 capital, $2.50/basket.
+# 4 DCA orders: 2×~$11.7=$23.4 < $32; max 2 concurrent baskets safe.
+# stop_pct: 9999 = no mark-price stop (DCA ladder caps loss via structure; track manually).
+# position_model hardcoded "single" in bot.py; DCA ladder = _enter safety orders.
+# Trade live: python bot.py --config DCA_bot_config.yaml
+# Dry run:  python bot.py --config DCA_bot_config.yaml --dry-run
+
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}
+
+symbols:
+- name: LABUSDT
+  direction: long
+  tp_pct: 1.05
+  stop_pct: 9999
+  max_dca_orders: 4
+  active: true
+
+global:
+  leverage: 10
+  base_margin: 2.5            # $/basket first order
+  dca_margin: 2.5            # per safety order
+  max_dca_orders: 4          # global default (symbol override same)
+  drop_step_pct: 0.65        # tighter step → lower avg entry on small moves
+  step_multiplier: 1.0       # linear spacing
+  size_multiplier: 1.1       # each safety = 1.1x prev
+  first_order_ratio: 0.96    # first safety = 0.96x base
+  max_concurrent_baskets: 2  # 2×~$11.7=$23.4 < $32
+  daily_loss_limit: 5.0      # tighten to 3.0 if want safety
+  fee_taker: 0.0005          # 0.05% market orders
+  fee_maker: 0.0002
+  poll_interval_sec: 60
+  risk_per_trade_pct: 0.0    # fixed base_margin, not % balance
+  trail_activate_pct: 0.0    # disabled
+  trail_buffer_pct: 0.0
+  entry_volume_filter: false
+  entry_volume_max_ratio: 2.5
+  dual_mode: false            # per-symbol direction honored; off
