@@ -18,6 +18,7 @@ Outputs
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
 import sys
@@ -262,6 +263,59 @@ def _yaml_block(rows: list[dict], p: LiveParams) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def _screen(symbols: list[str], months: list[str], p: LiveParams, fetch: bool) -> list[dict]:
+    results = []
+    for i, sym in enumerate(symbols, 1):
+        if i % 20 == 0:
+            logger.info("  %d / %d ...", i, len(symbols))
+        row = _run_symbol(sym, months, p, fetch=fetch)
+        if row:
+            results.append(row)
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results
+
+
+def _print_compare(symbols: list[str], months: list[str], p_base: LiveParams,
+                   p_alt: LiveParams, fetch: bool) -> None:
+    """Side-by-side diff: base config vs alt config for specific symbols."""
+    base = {r["symbol"]: r for r in _screen(symbols, months, p_base, fetch)}
+    alt  = {r["symbol"]: r for r in _screen(symbols, months, p_alt,  fetch)}
+
+    all_syms = sorted(set(base) | set(alt))
+
+    hdr = (f"{'SYMBOL':<16} {'N_base':>7} {'N_alt':>7} {'dN':>5}"
+           f"  {'EXP_base':>9} {'EXP_alt':>9}"
+           f"  {'RR_base':>8} {'RR_alt':>8}"
+           f"  {'PnL_base':>9} {'PnL_alt':>9}")
+    print(f"\nCOMPARE  body_pct={p_base.body_pct} vs {p_alt.body_pct}"
+          f"  tp_pct={p_base.tp_pct} vs {p_alt.tp_pct}\n")
+    print(hdr)
+    print("-" * len(hdr))
+    for sym in all_syms:
+        b = base.get(sym)
+        a = alt.get(sym)
+        nb  = b["n_trades"]       if b else 0
+        na  = a["n_trades"]       if a else 0
+        eb  = b["exp_per_trade"]  if b else 0.0
+        ea  = a["exp_per_trade"]  if a else 0.0
+        rb  = b["rr"]             if b else 0.0
+        ra  = a["rr"]             if a else 0.0
+        pb  = b["total_pnl"]      if b else 0.0
+        pa  = a["total_pnl"]      if a else 0.0
+        print(f"{sym:<16} {nb:>7} {na:>7} {na-nb:>+5}"
+              f"  {eb:>9.4f} {ea:>9.4f}"
+              f"  {rb:>8.2f} {ra:>8.2f}"
+              f"  {pb:>9.4f} {pa:>9.4f}")
+    print()
+    tot_b = sum((b or {}).get("total_pnl", 0) for b in [base.get(s) for s in all_syms])
+    tot_a = sum((a or {}).get("total_pnl", 0) for a in [alt.get(s)  for s in all_syms])
+    n_b   = sum((b or {}).get("n_trades",  0) for b in [base.get(s) for s in all_syms])
+    n_a   = sum((a or {}).get("n_trades",  0) for a in [alt.get(s)  for s in all_syms])
+    print(f"{'TOTAL':<16} {n_b:>7} {n_a:>7} {n_a-n_b:>+5}"
+          f"  {'':>9} {'':>9}  {'':>8} {'':>8}"
+          f"  {tot_b:>9.4f} {tot_a:>9.4f}  (delta={tot_a-tot_b:+.4f})")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="DCA-faithful symbol screener.")
     ap.add_argument("--config", default="DCA_Longrun_bot_config.yaml",
@@ -272,6 +326,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="Number of top symbols to show in YAML block (default: 20).")
     ap.add_argument("--symbols", default=None, metavar="SYM1,SYM2,...",
                     help="Comma-separated override (default: full perps universe).")
+    ap.add_argument("--body-pct", type=float, default=None, metavar="FLOAT",
+                    help="Override body_pct from config.")
+    ap.add_argument("--tp-pct", type=float, default=None, metavar="FLOAT",
+                    help="Override tp_pct from config.")
+    ap.add_argument("--compare", action="store_true", default=False,
+                    help="Side-by-side compare config params vs --body-pct/--tp-pct overrides. Requires --symbols.")
     args = ap.parse_args(argv)
 
     p = _load_live_params(args.config)
@@ -279,16 +339,10 @@ def main(argv: list[str] | None = None) -> None:
     # 1-month window ending yesterday
     now = datetime.now(tz=timezone.utc)
     end_month = f"{now.year}-{now.month:02d}"
-    # go back ~1 month: if month > 1 subtract, else roll year
     m = now.month - 1 or 12
     y = now.year if now.month > 1 else now.year - 1
     start_month = f"{y}-{m:02d}"
     months = months_list(start_month, end_month)
-
-    logger.info("Params loaded from %s", args.config)
-    logger.info("  tp_pct=%.4f  body_pct=%.1f  drop=%.2f  max_dca=%d  lev=%dx  margin=$%.2f",
-                p.tp_pct, p.body_pct, p.drop_step_pct, p.max_dca_orders, p.leverage, p.base_margin)
-    logger.info("  window: %s → %s", months[0], months[-1])
 
     if args.symbols:
         symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
@@ -296,21 +350,36 @@ def main(argv: list[str] | None = None) -> None:
         logger.info("Fetching symbol universe...")
         symbols = _get_symbols()
 
+    # compare mode
+    if args.compare:
+        if not args.symbols:
+            ap.error("--compare requires --symbols")
+        p_alt = dataclasses.replace(
+            p,
+            body_pct=args.body_pct if args.body_pct is not None else p.body_pct,
+            tp_pct=args.tp_pct   if args.tp_pct   is not None else p.tp_pct,
+        )
+        _print_compare(symbols, months, p, p_alt, args.fetch)
+        return
+
+    # apply overrides for normal run
+    if args.body_pct is not None:
+        p = dataclasses.replace(p, body_pct=args.body_pct)
+    if args.tp_pct is not None:
+        p = dataclasses.replace(p, tp_pct=args.tp_pct)
+
+    logger.info("Params loaded from %s", args.config)
+    logger.info("  tp_pct=%.4f  body_pct=%.1f  drop=%.2f  max_dca=%d  lev=%dx  margin=$%.2f",
+                p.tp_pct, p.body_pct, p.drop_step_pct, p.max_dca_orders, p.leverage, p.base_margin)
+    logger.info("  window: %s → %s", months[0], months[-1])
+
     logger.info("Screening %d symbols...", len(symbols))
 
-    results = []
-    for i, sym in enumerate(symbols, 1):
-        if i % 20 == 0:
-            logger.info("  %d / %d ...", i, len(symbols))
-        row = _run_symbol(sym, months, p, fetch=args.fetch)
-        if row:
-            results.append(row)
+    results = _screen(symbols, months, p, fetch=args.fetch)
 
     if not results:
         print("\n(No symbols produced results — try --fetch or check cache.)\n")
         return
-
-    results.sort(key=lambda r: r["score"], reverse=True)
 
     print(f"\nDCA screener  config={args.config}  window={months[0]}→{months[-1]}"
           f"  n_symbols={len(symbols)}  with_results={len(results)}\n")
