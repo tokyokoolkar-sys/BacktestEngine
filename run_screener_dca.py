@@ -316,6 +316,128 @@ def _print_compare(symbols: list[str], months: list[str], p_base: LiveParams,
           f"  {tot_b:>9.4f} {tot_a:>9.4f}  (delta={tot_a-tot_b:+.4f})")
 
 
+def _worst_case_basket(p: LiveParams) -> float:
+    """Max capital deployed per basket if all DCA orders fill."""
+    margin = p.base_margin
+    total = margin  # base order
+    size = margin * p.first_order_ratio
+    for _ in range(p.max_dca_orders):
+        total += size
+        size *= p.size_multiplier
+    return total
+
+
+def _optimize(symbols: list[str], months: list[str], p_base: LiveParams,
+              fetch: bool, max_basket_usdt: float) -> None:
+    """Grid-search body_pct × tp_pct × drop_step_pct × max_dca_orders × size_multiplier
+    per symbol. Print best combo per symbol + combined yaml block."""
+
+    BODY_PCTS      = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    TP_PCTS        = [1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08]
+    DROP_STEPS     = [0.5, 0.6, 0.68, 0.8, 1.0]
+    MAX_DCA_ORDERS = [2, 3, 4, 5]
+    SIZE_MULTS     = [1.0, 1.1, 1.2, 1.5]
+
+    total_combos = len(BODY_PCTS) * len(TP_PCTS) * len(DROP_STEPS) * len(MAX_DCA_ORDERS) * len(SIZE_MULTS)
+    logger.info("Optimize: %d combos × %d symbols = %d backtests",
+                total_combos, len(symbols), total_combos * len(symbols))
+    logger.info("Capital constraint: max_basket <= $%.2f", max_basket_usdt)
+
+    best_per_symbol: dict[str, dict] = {}
+
+    for sym_i, symbol in enumerate(symbols, 1):
+        logger.info("[%d/%d] optimizing %s ...", sym_i, len(symbols), symbol)
+        best = None
+        for body in BODY_PCTS:
+            for tp in TP_PCTS:
+                for drop in DROP_STEPS:
+                    for ndca in MAX_DCA_ORDERS:
+                        for smult in SIZE_MULTS:
+                            p = dataclasses.replace(
+                                p_base,
+                                body_pct=body,
+                                tp_pct=tp,
+                                drop_step_pct=drop,
+                                max_dca_orders=ndca,
+                                size_multiplier=smult,
+                            )
+                            # capital constraint — skip if basket too large
+                            if _worst_case_basket(p) > max_basket_usdt:
+                                continue
+                            row = _run_symbol(symbol, months, p, fetch=fetch)
+                            if row is None:
+                                continue
+                            row["body_pct"]       = body
+                            row["tp_pct"]         = tp
+                            row["drop_step_pct"]  = drop
+                            row["max_dca_orders"] = ndca
+                            row["size_multiplier"]= smult
+                            row["basket_worst"]   = round(_worst_case_basket(p), 2)
+                            if best is None or row["score"] > best["score"]:
+                                best = row
+        if best:
+            best_per_symbol[symbol] = best
+
+    if not best_per_symbol:
+        print("\n(No results — all combos exceeded capital constraint or no data.)\n")
+        return
+
+    # Print results
+    hdr = (f"{'SYMBOL':<16} {'SCORE':>8} {'EXP':>8} {'WK_ROI%':>8} {'N':>5} {'WIN%':>6}"
+           f" {'RR':>5} {'body':>5} {'tp':>5} {'drop':>5} {'ndca':>5} {'smult':>6} {'basket$':>8}")
+    print(f"\nOPTIMIZE  capital_cap=${ max_basket_usdt:.2f}  symbols={len(symbols)}\n")
+    print(hdr)
+    print("-" * len(hdr))
+    total_pnl = 0.0
+    for symbol in symbols:
+        r = best_per_symbol.get(symbol)
+        if not r:
+            print(f"{symbol:<16}  (no result)")
+            continue
+        total_pnl += r["total_pnl"]
+        print(f"{symbol:<16}"
+              f" {r['score']:>8.4f}"
+              f" {r['exp_per_trade']:>8.4f}"
+              f" {r['weekly_roi_pct']:>8.3f}"
+              f" {r['n_trades']:>5}"
+              f" {r['win_rate']*100:>5.1f}%"
+              f" {r['rr']:>5.2f}"
+              f" {r['body_pct']:>5.1f}"
+              f" {r['tp_pct']:>5.2f}"
+              f" {r['drop_step_pct']:>5.2f}"
+              f" {r['max_dca_orders']:>5}"
+              f" {r['size_multiplier']:>6.1f}"
+              f" {r['basket_worst']:>8.2f}")
+    print("-" * len(hdr))
+    print(f"{'TOTAL PnL/mo':<16}  {'':>8} {'':>8} {'':>8} {'':>5} {'':>6} {'':>5}"
+          f" {'':>5} {'':>5} {'':>5} {'':>5} {'':>6}  ${total_pnl:.4f}")
+
+    # YAML block — per-symbol optimized params
+    print(f"\n--- YAML block (optimized per-symbol) ---\n")
+    print("symbols:")
+    for symbol in symbols:
+        r = best_per_symbol.get(symbol)
+        if not r:
+            continue
+        print(f"  - name: {symbol}")
+        print(f"    direction: {p_base.direction}")
+        print(f"    tp_pct: {r['tp_pct']}")
+        print(f"    stop_pct: 9999")
+        print(f"    max_dca_orders: {r['max_dca_orders']}")
+        print(f"    body_pct: {r['body_pct']}")
+        print(f"    active: true")
+
+    # Global params most common across symbols (drop_step, size_mult)
+    drops = [best_per_symbol[s]["drop_step_pct"] for s in symbols if s in best_per_symbol]
+    smults = [best_per_symbol[s]["size_multiplier"] for s in symbols if s in best_per_symbol]
+    from collections import Counter
+    best_drop = Counter(drops).most_common(1)[0][0]
+    best_smult = Counter(smults).most_common(1)[0][0]
+    print(f"\n# Suggested global overrides (most common across symbols):")
+    print(f"# drop_step_pct: {best_drop}")
+    print(f"# size_multiplier: {best_smult}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="DCA-faithful symbol screener.")
     ap.add_argument("--config", default="DCA_Longrun_bot_config.yaml",
@@ -332,6 +454,10 @@ def main(argv: list[str] | None = None) -> None:
                     help="Override tp_pct from config.")
     ap.add_argument("--compare", action="store_true", default=False,
                     help="Side-by-side compare config params vs --body-pct/--tp-pct overrides. Requires --symbols.")
+    ap.add_argument("--optimize", action="store_true", default=False,
+                    help="Grid-search all params per symbol, pick best combo within capital cap. Requires --symbols.")
+    ap.add_argument("--max-basket", type=float, default=17.0, metavar="USDT",
+                    help="Max worst-case capital per basket for --optimize (default: 17.0 = half of $35).")
     args = ap.parse_args(argv)
 
     p = _load_live_params(args.config)
@@ -349,6 +475,13 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logger.info("Fetching symbol universe...")
         symbols = _get_symbols()
+
+    # optimize mode
+    if args.optimize:
+        if not args.symbols:
+            ap.error("--optimize requires --symbols")
+        _optimize(symbols, months, p, args.fetch, args.max_basket)
+        return
 
     # compare mode
     if args.compare:
