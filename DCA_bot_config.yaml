@@ -12,7 +12,7 @@ api:
 symbols:
 - name: LABUSDT
   direction: long
-  tp_pct: 1.2
+  tp_pct: 1.08
   stop_pct: 9999
   max_dca_orders: 4
   body_pct: 2.0
@@ -35,6 +35,6 @@ global:
   risk_per_trade_pct: 0.0    # fixed base_margin, not % balance
   trail_activate_pct: 0.0    # disabled
   trail_buffer_pct: 0.0
-  entry_volume_filter: false
-  entry_volume_max_ratio: 2.5
+  entry_volume_filter: true    # hardened — skip entry on volume spikes (falling-knife)
+  entry_volume_max_ratio: 2.0  # hardened — 2x 24h avg vol = blowoff, don't catch
   dual_mode: false            # per-symbol direction honored; off
