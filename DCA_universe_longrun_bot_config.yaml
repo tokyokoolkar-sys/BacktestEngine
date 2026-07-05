@@ -1,0 +1,103 @@
+# DCA_universe_longrun_bot_config.yaml
+# 10-symbol quality universe — RR > 2.3, cushion > 59%, worst > -$0.56, no liquidation events.
+# PORTALUSDT kept for volume (133 trades/mo). Dropped ESPORTS/CLO/SIREN (RR<0.6, liq risk).
+# max_concurrent_baskets: 2 — 3 worst-case = $40.89 > $35 capital on full DCA fill.
+# Trade live: python bot.py --config DCA_universe_longrun_bot_config.yaml
+# Dry run:    python bot.py --config DCA_universe_longrun_bot_config.yaml --dry-run
+
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}
+
+symbols:
+  # Elite RR — near-zero downside per loss
+  - name: AIAUSDT         # RR=25.17  cushion=90%  N=46   worst=-$0.005
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: JELLYJELLYUSDT  # RR=14.25  cushion=75%  N=32   worst=-$0.016
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: CTRUSDT          # RR=7.14   cushion=80%  N=37   worst=-$0.023
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: TACUSDT          # RR=7.15   cushion=79%  N=45   worst=-$0.020
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: OPGUSDT          # RR=6.88   cushion=80%  N=42   worst=-$0.019
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: GWEIUSDT         # RR=5.69   cushion=69%  N=62   worst=-$0.052
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: CAPUSDT          # RR=5.38   cushion=72%  N=25   worst=-$0.034
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: OUSDT            # RR=2.38   cushion=62%  N=35   worst=-$0.046
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  - name: MYXUSDT          # RR=2.30   cushion=59%  N=94   worst=-$0.171
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+  # Volume anchor
+  - name: PORTALUSDT       # RR=0.74   cushion=37%  N=133  worst=-$0.557
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 2.0
+    active: true
+
+global:
+  leverage: 9
+  base_margin: 2.5            # $/basket first order
+  dca_margin: 2.5             # per safety order
+  max_dca_orders: 4
+  drop_step_pct: 0.68
+  step_multiplier: 1.0
+  size_multiplier: 1.1
+  first_order_ratio: 0.96
+  max_concurrent_baskets: 2   # 3 baskets worst-case = $40.89 > $35 capital
+  daily_loss_limit: 3.5
+  fee_taker: 0.0005
+  fee_maker: 0.0002
+  poll_interval_sec: 60
+  risk_per_trade_pct: 0.0
+  trail_activate_pct: 0.75
+  trail_buffer_pct: 0.45
+  ntfy_topic: kool-bot-7x4q9
