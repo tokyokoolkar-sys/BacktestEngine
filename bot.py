@@ -105,7 +105,8 @@ class SymbolConfig:
     stop_pct: float
     active: bool = True
     max_dca_orders: int | None = None       # override global max_dca_orders per symbol
-    direction: str = "long"                 # per-symbol entry direction: "long" | "short"
+    direction: str = "long"                 # "long" or "short"
+    body_pct: float = 0.0                   # min candle body % to allow entry (0 = off)
 
 
 @dataclass
@@ -129,6 +130,7 @@ class GlobalConfig:
     entry_volume_filter: bool = False     # skip entry when volume > entry_volume_max_ratio × 24h avg
     entry_volume_max_ratio: float = 2.5   # volume threshold
     dual_mode: bool = False                # alternate long/short on each new entry
+    ntfy_topic: str = ""                   # ntfy.sh topic for push alerts (empty = disabled)
 
 
 @dataclass
@@ -186,6 +188,22 @@ def _write_trade(row: dict):
         w = csv.DictWriter(f, fieldnames=_TRADE_LOG_COLS)
         w.writerow(row)
     logger.info("Trade logged: %s", row.get("symbol"))
+
+
+def _notify(topic: str, msg: str, title: str = "Bot") -> None:
+    """Fire-and-forget push to ntfy.sh. Silently swallows all errors."""
+    if not topic:
+        return
+    try:
+        import requests as _req
+        _req.post(
+            f"https://ntfy.sh/{topic}",
+            data=msg.encode(),
+            headers={"Title": title, "Priority": "default"},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 
 def _daily_pnl() -> float:
@@ -525,6 +543,18 @@ class DcaBot:
                      symbol, action, float(latest[4]),
                      "yes" if float(latest[4]) > float(latest[1]) else "no")
         if action == "enter":
+            # Body size filter: skip entry if candle body < threshold
+            sc = next((s for s in self.cfg.symbols if s.name == symbol), None)
+            if sc is not None and sc.body_pct > 0.0:
+                o, c = float(latest[1]), float(latest[4])
+                if sc.direction == "long":
+                    body = (o - c) / o * 100 if o > c else 0.0   # red candle body
+                else:
+                    body = (c - o) / o * 100 if c > o else 0.0   # green candle body
+                if body < sc.body_pct:
+                    logger.info("%s: BODY-FILTER — body=%.3f%% < %.1f%%, skipping",
+                                symbol, body, sc.body_pct)
+                    return None, klines
             # Volume filter: skip entry during high-volume (panic) conditions
             if self.g.entry_volume_filter:
                 try:
@@ -970,6 +1000,10 @@ class DcaBot:
                     })
                     logger.info("%s: CLOSED  reason=%s  gross=%.4f  net=%.4f  pnl=%.2f%%",
                                  symbol, exit_reason, gross_pnl, net_pnl, pnl_pct)
+                    _notify(self.g.ntfy_topic,
+                            f"{symbol} {exit_reason.upper()}  net=${net_pnl:+.4f}  "
+                            f"dca={basket.n_safety_filled}  day=${_daily_pnl():+.2f}",
+                            title="Trade Closed")
 
                 basket.state = "closing"
                 self._cancel_remaining_orders(basket)
@@ -1012,6 +1046,10 @@ class DcaBot:
                         })
                         logger.info("%s: CLOSED (reconstructed)  reason=%s  net=%.4f  pnl=%.2f%%",
                                      symbol, exit_reason, net_pnl, pnl_pct)
+                        _notify(self.g.ntfy_topic,
+                                f"{symbol} {exit_reason.upper()} (reconstructed)  net=${net_pnl:+.4f}  "
+                                f"day=${_daily_pnl():+.2f}",
+                                title="Trade Closed")
                     self._cancel_remaining_orders(basket)
                     self.strategies[symbol].reset()
                     if self.g.dual_mode:
@@ -1761,6 +1799,12 @@ class DcaBot:
         bot_pid_path.write_text(str(os.getpid()))
         logger.info("bot.pid written (pid=%d)", os.getpid())
 
+        _notify(self.g.ntfy_topic,
+                f"Bot STARTED  dry_run={self.dry_run}  baskets={len(self.baskets)}",
+                title="Bot Started")
+
+        _last_summary_day: int = -1
+
         try:
             while True:
                 # One bad cycle (network error, exchange hiccup, bug in a single
@@ -1772,6 +1816,15 @@ class DcaBot:
                     self._write_status_json()
                     logger.info("cycle done — %d active basket(s); next check in %ds.",
                                 len(self.baskets), self.g.poll_interval_sec)
+
+                    # Daily summary fires once at first cycle after midnight UTC
+                    _today = datetime.now(timezone.utc).day
+                    if _today != _last_summary_day and _last_summary_day != -1:
+                        _notify(self.g.ntfy_topic,
+                                f"Daily PnL: ${_daily_pnl():+.2f}  open={len(self.baskets)}",
+                                title="Daily Summary")
+                    _last_summary_day = _today
+
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
@@ -1779,6 +1832,9 @@ class DcaBot:
                 time.sleep(self.g.poll_interval_sec)
         except KeyboardInterrupt:
             logger.info("Bot stopped by user.")
+            _notify(self.g.ntfy_topic,
+                    f"Bot STOPPED  day PnL: ${_daily_pnl():+.2f}",
+                    title="Bot Stopped")
         finally:
             try:
                 bot_pid_path.unlink(missing_ok=True)
