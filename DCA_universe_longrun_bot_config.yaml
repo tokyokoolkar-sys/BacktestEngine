@@ -1,7 +1,8 @@
 # DCA_universe_longrun_bot_config.yaml
-# 10-symbol quality universe — RR > 2.3, cushion > 59%, worst > -$0.56, no liquidation events.
-# PORTALUSDT kept for volume (133 trades/mo). Dropped ESPORTS/CLO/SIREN (RR<0.6, liq risk).
-# max_concurrent_baskets: 2 — 3 worst-case = $40.89 > $35 capital on full DCA fill.
+# 9-symbol optimized universe — 33,600 backtests, per-symbol best combo within $17/basket cap.
+# Dropped OPGUSDT (negative exp after optimization).
+# TACUSDT/JELLYJELLYUSDT flagged low sample (<25 trades) — watch live.
+# Theoretical: ~$74/mo. Realistic: ~$45-55/mo at max_concurrent_baskets=2.
 # Trade live: python bot.py --config DCA_universe_longrun_bot_config.yaml
 # Dry run:    python bot.py --config DCA_universe_longrun_bot_config.yaml --dry-run
 
@@ -10,90 +11,80 @@ api:
   secret: ${BINANCE_API_SECRET}
 
 symbols:
-  # Elite RR — near-zero downside per loss
-  # body_pct=2.0 — RR collapses at 1.5, PnL drops
-  - name: JELLYJELLYUSDT  # RR=14.25→0.58  PnL $2.19→$1.15 at 1.5
+  - name: CAPUSDT        # N=136  exp=0.065  RR=1.78  basket=$14.50
+    direction: long
+    tp_pct: 1.05
+    stop_pct: 9999
+    max_dca_orders: 5
+    body_pct: 1.0
+    active: true
+  - name: OUSDT          # N=78   exp=0.072  RR=4.17  basket=$15.38
     direction: long
     tp_pct: 1.06
     stop_pct: 9999
     max_dca_orders: 4
+    body_pct: 1.5
+    active: true
+  - name: MYXUSDT        # N=168  exp=0.057  RR=0.67  basket=$8.50
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 2
+    body_pct: 1.5
+    active: true
+  - name: PORTALUSDT     # N=593  exp=0.045  RR=0.81  basket=$13.90
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 3
+    body_pct: 1.0
+    active: true
+  - name: AIAUSDT        # N=192  exp=0.050  RR=1.08  basket=$14.50
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 5
+    body_pct: 1.0
+    active: true
+  - name: CTRUSDT        # N=37   exp=0.096  RR=1.54  basket=$7.78
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 2
     body_pct: 2.0
     active: true
-  - name: TACUSDT          # RR=7.15→0.35  PnL $3.35→$2.79 at 1.5
+  - name: GWEIUSDT       # N=121  exp=0.056  RR=1.70  basket=$13.64
     direction: long
-    tp_pct: 1.06
-    stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 2.0
-    active: true
-  - name: CAPUSDT          # RR=5.38→1.31  keep quality
-    direction: long
-    tp_pct: 1.06
-    stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 2.0
-    active: true
-  # body_pct=1.5 — more trades, PnL improves
-  - name: AIAUSDT         # PnL $2.74→$4.06  +$1.32
-    direction: long
-    tp_pct: 1.06
+    tp_pct: 1.08
     stop_pct: 9999
     max_dca_orders: 4
     body_pct: 1.5
     active: true
-  - name: GWEIUSDT         # PnL $4.60→$6.59  +$1.99
+  - name: TACUSDT        # N=24   exp=0.153  RR=999   basket=$7.30  ⚠️ low sample
     direction: long
-    tp_pct: 1.06
+    tp_pct: 1.07
     stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 1.5
+    max_dca_orders: 2
+    body_pct: 2.5
     active: true
-  - name: OUSDT            # PnL $2.45→$5.08  +$2.63
+  - name: JELLYJELLYUSDT # N=11   exp=0.167  RR=999   basket=$11.24 ⚠️ low sample
     direction: long
-    tp_pct: 1.06
+    tp_pct: 1.08
     stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 1.5
-    active: true
-  - name: MYXUSDT          # PnL $5.14→$7.77  +$2.63
-    direction: long
-    tp_pct: 1.06
-    stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 1.5
-    active: true
-  - name: OPGUSDT          # PnL $2.16→$3.11  +$0.95
-    direction: long
-    tp_pct: 1.06
-    stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 1.5
-    active: true
-  - name: CTRUSDT          # PnL $1.70→$2.89  +$1.19
-    direction: long
-    tp_pct: 1.06
-    stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 1.5
-    active: true
-  - name: PORTALUSDT       # PnL $10.17→$13.66  +$3.49
-    direction: long
-    tp_pct: 1.06
-    stop_pct: 9999
-    max_dca_orders: 4
-    body_pct: 1.5
+    max_dca_orders: 3
+    body_pct: 3.0
     active: true
 
 global:
   leverage: 10
   base_margin: 2.5            # $/basket first order
   dca_margin: 2.5             # per safety order
-  max_dca_orders: 4
-  drop_step_pct: 0.68
+  max_dca_orders: 4           # per-symbol overrides take precedence
+  drop_step_pct: 0.5          # optimizer consensus across symbols
   step_multiplier: 1.0
-  size_multiplier: 1.1
+  size_multiplier: 1.0        # optimizer consensus across symbols
   first_order_ratio: 0.96
-  max_concurrent_baskets: 2   # 3 baskets worst-case = $40.89 > $35 capital
+  max_concurrent_baskets: 2   # 2 × $15.38 worst = $30.76 fits $35
   daily_loss_limit: 3.5
   fee_taker: 0.0005
   fee_maker: 0.0002
