@@ -60,14 +60,14 @@ symbols:
     max_dca_orders: 4
     body_pct: 1.5
     active: true
-  - name: TACUSDT        # N=24   exp=0.153  RR=999   basket=$7.30  ⚠️ low sample
+  - name: TACUSDT        # N=24   exp=0.153  RR=999   basket=$7.30  WARN: low sample
     direction: long
     tp_pct: 1.07
     stop_pct: 9999
     max_dca_orders: 2
     body_pct: 2.5
     active: true
-  - name: JELLYJELLYUSDT # N=11   exp=0.167  RR=999   basket=$11.24 ⚠️ low sample
+  - name: JELLYJELLYUSDT # N=11   exp=0.167  RR=999   basket=$11.24 WARN: low sample
     direction: long
     tp_pct: 1.08
     stop_pct: 9999
