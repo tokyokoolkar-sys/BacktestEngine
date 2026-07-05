@@ -12,9 +12,10 @@ api:
 symbols:
 - name: LABUSDT
   direction: long
-  tp_pct: 1.05
+  tp_pct: 1.2
   stop_pct: 9999
   max_dca_orders: 4
+  body_pct: 2.0
   active: true
 
 global:

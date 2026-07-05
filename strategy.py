@@ -117,14 +117,7 @@ class CheckpointStrategy:
 
         if cfg.entry_mode == "red_dip":
             if not is_green:
-                # Red close while armed -> enter long
-                self._state = self._POS
-                self._saw_red = False
-                if prev_row is not None:
-                    self._prior_high = prev_row["high"]
-                else:
-                    self._prior_high = row["high"]
-                return "enter"
+                return self._try_enter(prev_row, row)
             # Green while armed -> stay armed, reset confirm flag
             self._saw_red = False
             return "none"
@@ -137,16 +130,24 @@ class CheckpointStrategy:
             else:
                 # Green bar
                 if self._saw_red:
-                    # Green after red -> enter
-                    self._state = self._POS
-                    self._saw_red = False
-                    if prev_row is not None:
-                        self._prior_high = prev_row["high"]
-                    else:
-                        self._prior_high = row["high"]
-                    return "enter"
+                    return self._try_enter(prev_row, row)
                 # Green without prior red -> stay armed
                 return "none"
+
+    def _try_enter(self, prev_row, row) -> str:
+        """Gate entry on body_pct; transition to IN_POSITION if it passes."""
+        cfg = self.cfg
+        if cfg.body_pct > 0.0:
+            o = float(row["open"]); c = float(row["close"])
+            body = abs(o - c) / o * 100.0 if o > 0 else 0.0
+            if body < cfg.body_pct:
+                # Body too small -> stay armed, no entry
+                self._saw_red = False
+                return "none"
+        self._state = self._POS
+        self._saw_red = False
+        self._prior_high = prev_row["high"] if prev_row is not None else row["high"]
+        return "enter"
 
     def _handle_in_position(self, row, is_green: bool) -> str:
         """IN_POSITION: check for checkpoint exit; engine handles stop/liq/TP."""

@@ -83,6 +83,12 @@ class StrategyConfig:
     entry_volume_max_ratio: float = 2.5
     # Volume ratio threshold. Entry skipped when vol / 24h_MA_vol >= this value.
 
+    body_pct: float = 0.0
+    # Min candle body size (% of open) to allow entry. 0 = off (no body gate).
+    # long:  body = (open - close) / open * 100  (red candle)
+    # short: body = (close - open) / open * 100  (green candle)
+    # Entry skipped when body < body_pct.
+
 
 @dataclass
 class ExecConfig:
