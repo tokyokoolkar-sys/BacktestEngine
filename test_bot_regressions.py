@@ -81,6 +81,10 @@ class SignalRegressionTests(unittest.TestCase):
         bot.dry_run = False
         bot.g = GlobalConfig()
         bot.last_candle_time = {}
+        bot.cfg = BotConfig(
+            symbols=[SymbolConfig(name="BTCUSDT", tp_pct=0.5, stop_pct=3.0)],
+            global_=GlobalConfig(), api_key="", api_secret="",
+        )
         bot.strategies = {"BTCUSDT": __import__("strategy").CheckpointStrategy(__import__("config").StrategyConfig(
             entry_mode="red_dip",
             green_gate="off",
@@ -113,6 +117,30 @@ class SignalRegressionTests(unittest.TestCase):
         )
 
         self.assertEqual([s.name for s in cfg.active_symbols()], ["BTCUSDT"])
+
+    def test_symbol_config_direction_default_is_long(self):
+        sc = SymbolConfig(name="BTCUSDT", tp_pct=0.5, stop_pct=3.0)
+        self.assertEqual(sc.direction, "long")
+
+    def test_symbol_config_direction_short_overrides(self):
+        sc = SymbolConfig(name="BTCUSDT", tp_pct=0.5, stop_pct=3.0, direction="short")
+        self.assertEqual(sc.direction, "short")
+
+    def test_strategy_uses_per_symbol_direction(self):
+        from strategy import CheckpointStrategy
+        from config import StrategyConfig
+        sc_long = SymbolConfig(name="BTCUSDT", tp_pct=0.5, stop_pct=3.0, direction="long")
+        sc_short = SymbolConfig(name="BTCUSDT", tp_pct=0.5, stop_pct=3.0, direction="short")
+        strat_long = CheckpointStrategy(StrategyConfig(
+            entry_mode="red_dip", green_gate="off", stop_mode="none",
+            checkpoint_mode="first_green", position_model="single",
+            direction=sc_long.direction))
+        strat_short = CheckpointStrategy(StrategyConfig(
+            entry_mode="red_dip", green_gate="off", stop_mode="none",
+            checkpoint_mode="first_green", position_model="single",
+            direction=sc_short.direction))
+        self.assertEqual(strat_long.cfg.direction, "long")
+        self.assertEqual(strat_short.cfg.direction, "short")
 
 
 class DashboardRegressionTests(unittest.TestCase):
