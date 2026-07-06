@@ -39,10 +39,14 @@ class StrategyConfig:
     # "none"         — no hard stop
     # "fixed"        — stop at entry * (1 - stop_pct/100)
     # "atr"          — stop at entry - stop_atr_mult * ATR(atr_period)
+    # "trail"        — trailing stop: activates at avg_entry*(1+trail_activate_pct/100),
+    #                  stop = highest_price*(1-trail_buffer_pct/100)
 
     stop_pct: Optional[float] = None          # used when stop_mode="fixed"
     stop_atr_mult: Optional[float] = None     # used when stop_mode="atr"
     atr_period: int = 14                      # Wilder ATR look-back
+    trail_activate_pct: float = 0.75          # used when stop_mode="trail"
+    trail_buffer_pct: float = 0.45            # used when stop_mode="trail"
 
     checkpoint_mode: str = "first_green"
     # "first_green"  — exit position on first green candle close

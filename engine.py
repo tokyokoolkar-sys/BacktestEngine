@@ -285,6 +285,8 @@ def run_backtest(
     stop_price: float | None = None
     liq_price: float = 0.0
     tp_price: float | None = None
+    trail_activated: bool = False
+    trail_highest: float = 0.0
 
     # DCA-specific state
     base_notional: float = 0.0
@@ -348,6 +350,29 @@ def run_backtest(
                         stop_price = _compute_stop(avg_entry, atr_arr[i], scfg)
                     else:
                         break  # triggers are in order; no need to check further
+
+            # Trail stop update: activate once price clears threshold, then ratchet up.
+            if scfg.stop_mode == "trail" and in_position:
+                _activate_threshold = avg_entry * (1.0 + scfg.trail_activate_pct / 100.0) if not _short \
+                    else avg_entry * (1.0 - scfg.trail_activate_pct / 100.0)
+                if not _short:
+                    _bar_extreme = bar_high
+                    if not trail_activated and _bar_extreme >= _activate_threshold:
+                        trail_activated = True
+                        trail_highest = _bar_extreme
+                    if trail_activated and _bar_extreme > trail_highest:
+                        trail_highest = _bar_extreme
+                    if trail_activated:
+                        stop_price = trail_highest * (1.0 - scfg.trail_buffer_pct / 100.0)
+                else:
+                    _bar_extreme = bar_low
+                    if not trail_activated and _bar_extreme <= _activate_threshold:
+                        trail_activated = True
+                        trail_highest = _bar_extreme
+                    if trail_activated and _bar_extreme < trail_highest:
+                        trail_highest = _bar_extreme
+                    if trail_activated:
+                        stop_price = trail_highest * (1.0 + scfg.trail_buffer_pct / 100.0)
 
             # Exit priority (assumption 9): downside levels cross highest-price-first, so a stop
             # above the liq price fills before liquidation (the stop protects).
@@ -437,6 +462,8 @@ def run_backtest(
                 running_equity += closed_trade.net_pnl
                 equity_curve.append((closed_trade.exit_time, running_equity))
                 in_position = False
+                trail_activated = False
+                trail_highest = 0.0
                 # Dual-mode: flip direction after each completed trade.
                 # Refresh _short so the engine prices the next trade in the new
                 # direction — flip_direction mutates scfg.direction, but _short
@@ -486,6 +513,8 @@ def run_backtest(
                     running_equity += df_trade.net_pnl
                     equity_curve.append((df_trade.exit_time, running_equity))
                     in_position = False
+                    trail_activated = False
+                    trail_highest = 0.0
                     strategy.flip_direction()
                     _short = scfg.direction == "short"
                     last_flip_bar = i
@@ -540,6 +569,8 @@ def run_backtest(
             running_equity += t.net_pnl
             equity_curve.append((t.exit_time, running_equity))
             in_position = False
+            trail_activated = False
+            trail_highest = 0.0
             if scfg.dual_mode:
                 strategy.flip_direction()
                 _short = scfg.direction == "short"
@@ -664,6 +695,9 @@ def _compute_stop(fill_price: float, atr: float, scfg: StrategyConfig) -> float 
         if scfg.stop_pct is None:
             return None
         return fill_price * (1.0 + scfg.stop_pct / 100.0) if _short else fill_price * (1.0 - scfg.stop_pct / 100.0)
+    if scfg.stop_mode == "trail":
+        # Initial stop = entry × (1 - buffer/100); ratchets up per-bar in the main loop.
+        return fill_price * (1.0 + scfg.trail_buffer_pct / 100.0) if _short else fill_price * (1.0 - scfg.trail_buffer_pct / 100.0)
     if scfg.stop_mode == "atr":
         if scfg.stop_atr_mult is None or np.isnan(atr):
             return None  # assumption 13: no stop until ATR valid
