@@ -105,6 +105,7 @@ class SymbolConfig:
     stop_pct: float
     active: bool = True
     max_dca_orders: int | None = None       # override global max_dca_orders per symbol
+    drop_step_pct: float | None = None      # override global drop_step_pct per symbol
     direction: str = "long"                 # "long" or "short"
     body_pct: float = 0.0                   # min candle body % to allow entry (0 = off)
 
@@ -131,6 +132,11 @@ class GlobalConfig:
     entry_volume_max_ratio: float = 2.5   # volume threshold
     dual_mode: bool = False                # alternate long/short on each new entry
     ntfy_topic: str = ""                   # ntfy.sh topic for push alerts (empty = disabled)
+    ema_filter: bool = False               # long: require close > EMA(ema_period); fail-closed during warmup
+    ema_period: int = 20
+    red_candle_avoid_pct: float = 0.0      # 0 = off; skip entry if prev closed bar moved against direction by >= this %
+    require_volume_spike: bool = False     # require current-bar volume >= volume_spike_min_ratio × rolling 24-bar avg
+    volume_spike_min_ratio: float = 2.5
 
 
 @dataclass
@@ -284,10 +290,11 @@ def _dca_safety_notionals(gcfg: GlobalConfig, base_notional: float, dca_n: int |
     return out
 
 
-def _dca_safety_prices(entry_price: float, gcfg: GlobalConfig, dca_n: int | None = None) -> list[float]:
+def _dca_safety_prices(entry_price: float, gcfg: GlobalConfig, dca_n: int | None = None,
+                        step: float | None = None) -> list[float]:
     """Cumulative drop % → absolute price levels."""
     cum = 0.0
-    step = gcfg.drop_step_pct
+    step = step if step is not None else gcfg.drop_step_pct
     prices = []
     for k in range(dca_n if dca_n is not None else gcfg.max_dca_orders):
         cum += step * (gcfg.step_multiplier ** k)
@@ -386,6 +393,11 @@ class DcaBot:
                 position_model="single",
                 direction=sc.direction,
                 dual_mode=self.g.dual_mode,
+                ema_filter=self.g.ema_filter,
+                ema_period=self.g.ema_period,
+                red_candle_avoid_pct=self.g.red_candle_avoid_pct,
+                require_volume_spike=self.g.require_volume_spike,
+                volume_spike_min_ratio=self.g.volume_spike_min_ratio,
             ))
             self.last_trade[sc.name] = None
 
@@ -534,8 +546,9 @@ class DcaBot:
         self.last_candle_time[symbol] = close_time
 
         prev = klines[-3]
-        prev_row = {"high": float(prev[2]), "close": float(prev[4])}
-        row = {"open": float(latest[1]), "close": float(latest[4]), "high": float(latest[2])}
+        prev_row = {"high": float(prev[2]), "open": float(prev[1]), "close": float(prev[4])}
+        row = {"open": float(latest[1]), "close": float(latest[4]), "high": float(latest[2]),
+               "volume": float(latest[5])}
 
         strategy = self.strategies[symbol]
         action = strategy.on_closed_bar(prev_row, row, in_position=False)
@@ -584,6 +597,7 @@ class DcaBot:
 
         # Per-symbol DCA override: use symbol-level if set, fall back to global
         dca_n = sc.max_dca_orders if sc.max_dca_orders is not None else g.max_dca_orders
+        drop_step = sc.drop_step_pct if sc.drop_step_pct is not None else g.drop_step_pct
 
         # Set leverage per-symbol before entry
         if not self.dry_run:
@@ -652,7 +666,7 @@ class DcaBot:
             return
 
         safety_notionals = _dca_safety_notionals(g, base_notional, dca_n)
-        safety_prices = _dca_safety_prices(entry_price_r, g, dca_n)
+        safety_prices = _dca_safety_prices(entry_price_r, g, dca_n, step=drop_step)
 
         entry_fee = base_notional * g.fee_taker
         total_margin = base_notional * tr / g.leverage
@@ -1684,9 +1698,10 @@ class DcaBot:
             tick = lf.get("tickSize", 0.0)
             step = lf.get("stepSize", 0.001)
             base_notional = total_notional  # valid because n_safety_filled == 0
+            drop_step = scfg.drop_step_pct if scfg.drop_step_pct is not None else self.g.drop_step_pct
             ladder_notionals = _dca_safety_notionals(self.g, base_notional, dca_max)
-            ladder_prices = _dca_safety_prices(avg_entry, self.g, dca_max)
-            tolerance = max(tick, 0.4 * avg_entry * (self.g.drop_step_pct / 100.0))
+            ladder_prices = _dca_safety_prices(avg_entry, self.g, dca_max, step=drop_step)
+            tolerance = max(tick, 0.4 * avg_entry * (drop_step / 100.0))
             for i in range(dca_max):
                 sp = _round_price(ladder_prices[i], lf)
                 already_present = any(abs(sp - ep) <= tolerance for ep in existing_safety_prices)

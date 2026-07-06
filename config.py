@@ -93,6 +93,25 @@ class StrategyConfig:
     # short: body = (close - open) / open * 100  (green candle)
     # Entry skipped when body < body_pct.
 
+    ema_filter: bool = False
+    # False — no EMA trend gate
+    # True  — long: require close > EMA(ema_period); short: require close < EMA(ema_period)
+    # Fail-closed during warmup (fewer than ema_period bars seen).
+
+    ema_period: int = 20
+
+    red_candle_avoid_pct: float = 0.0
+    # 0 = off. Otherwise skip entry if the previous closed bar moved against the
+    # trade direction by >= this %: long checks (prev_open-prev_close)/prev_open*100,
+    # short checks the mirrored green-candle move.
+
+    require_volume_spike: bool = False
+    # False — no volume-spike requirement
+    # True  — require current bar volume >= volume_spike_min_ratio * rolling 24-bar avg.
+    # Fail-closed during warmup (fewer than 24 bars of volume history).
+
+    volume_spike_min_ratio: float = 2.5
+
 
 @dataclass
 class ExecConfig:

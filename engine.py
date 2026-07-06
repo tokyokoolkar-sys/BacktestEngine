@@ -302,9 +302,9 @@ def run_backtest(
     n = len(klines)
 
     for i in range(1, n):
-        prev_row = {"high": highs[i - 1]}
+        prev_row = {"high": highs[i - 1], "open": opens[i - 1], "close": closes[i - 1]}
         row = {"open": opens[i], "close": closes[i], "high": highs[i],
-               "low": lows[i], "t": times[i]}
+               "low": lows[i], "t": times[i], "volume": volumes[i]}
 
         # ------------------------------------------------------------------
         # 1. Intrabar checks for OPEN positions (using current bar i)

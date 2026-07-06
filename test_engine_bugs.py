@@ -427,3 +427,97 @@ class TestDrownFlip:
         assert "drown_flip" not in reasons, (
             f"drown_flip must not fire when liq is crossed first; got {reasons}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Feature: entry filters — ema_filter, red_candle_avoid_pct, require_volume_spike
+# ---------------------------------------------------------------------------
+
+class TestEntryFilters:
+    """New strategy.py entry gates for weakly_longrun_bot_config.
+
+    Each gate is tested directly against `_try_enter` (bypassing the is_green
+    routing in `_handle_armed`, same private-state-poking style already used by
+    TestCheckpointExitGateRouting above) so the gate logic is isolated from the
+    state machine's own entry-trigger semantics.
+    """
+
+    def _cfg(self, **overrides) -> StrategyConfig:
+        base = dict(
+            direction="long", entry_mode="red_dip", checkpoint_mode="first_green",
+            green_gate="off", stop_mode="none", position_model="single",
+        )
+        base.update(overrides)
+        return StrategyConfig(**base)
+
+    # --- ema_filter ---
+
+    def test_ema_gate_fails_closed_during_warmup(self):
+        strat = CheckpointStrategy(self._cfg(ema_filter=True, ema_period=5))
+        action = strat._try_enter({"high": 100.0}, {"open": 100.0, "close": 95.0})
+        assert action == "none", "EMA gate must block entry before any EMA history exists"
+
+    def test_ema_gate_blocks_below_ema(self):
+        strat = CheckpointStrategy(self._cfg(ema_filter=True, ema_period=2))
+        strat._ema = 100.0
+        action = strat._try_enter({"high": 100.0}, {"open": 100.0, "close": 90.0})
+        assert action == "none"
+
+    def test_ema_gate_allows_above_ema(self):
+        strat = CheckpointStrategy(self._cfg(ema_filter=True, ema_period=2))
+        strat._ema = 90.0
+        action = strat._try_enter({"high": 100.0}, {"open": 100.0, "close": 95.0})
+        assert action == "enter"
+
+    # --- red_candle_avoid_pct ---
+
+    def test_red_candle_avoid_blocks_after_big_drop(self):
+        strat = CheckpointStrategy(self._cfg(red_candle_avoid_pct=3.0))
+        prev_row = {"high": 100.0, "open": 100.0, "close": 94.0}  # 6% drop
+        action = strat._try_enter(prev_row, {"open": 94.0, "close": 90.0})
+        assert action == "none"
+
+    def test_red_candle_avoid_allows_small_drop(self):
+        strat = CheckpointStrategy(self._cfg(red_candle_avoid_pct=3.0))
+        prev_row = {"high": 100.0, "open": 100.0, "close": 99.0}  # 1% drop
+        action = strat._try_enter(prev_row, {"open": 99.0, "close": 95.0})
+        assert action == "enter"
+
+    def test_red_candle_avoid_off_when_zero(self):
+        strat = CheckpointStrategy(self._cfg(red_candle_avoid_pct=0.0))
+        prev_row = {"high": 100.0, "open": 100.0, "close": 90.0}  # big drop, gate off
+        action = strat._try_enter(prev_row, {"open": 90.0, "close": 85.0})
+        assert action == "enter"
+
+    # --- require_volume_spike ---
+
+    def test_volume_spike_fails_closed_during_warmup(self):
+        strat = CheckpointStrategy(self._cfg(require_volume_spike=True, volume_spike_min_ratio=2.5))
+        action = strat._try_enter({"high": 100.0}, {"open": 100.0, "close": 95.0})
+        assert action == "none", "volume-spike gate must block entry before 24 bars of history"
+
+    def test_volume_spike_blocks_without_spike(self):
+        strat = CheckpointStrategy(self._cfg(require_volume_spike=True, volume_spike_min_ratio=2.5))
+        strat._vol_window = [1000.0] * 24  # flat volume, no spike
+        action = strat._try_enter({"high": 100.0}, {"open": 100.0, "close": 95.0})
+        assert action == "none"
+
+    def test_volume_spike_allows_with_spike(self):
+        strat = CheckpointStrategy(self._cfg(require_volume_spike=True, volume_spike_min_ratio=2.5))
+        strat._vol_window = [1000.0] * 23 + [3000.0]  # last bar ~2.77x rolling avg
+        action = strat._try_enter({"high": 100.0}, {"open": 100.0, "close": 95.0})
+        assert action == "enter"
+
+    # --- end-to-end wiring through on_closed_bar ---
+
+    def test_running_state_builds_via_on_closed_bar(self):
+        """_update_running_state must run every closed bar (not just at _try_enter)."""
+        strat = CheckpointStrategy(self._cfg(require_volume_spike=True, volume_spike_min_ratio=2.5))
+        for _ in range(24):
+            row = {"open": 100.0, "close": 101.0, "high": 101.0, "volume": 1000.0}
+            strat.on_closed_bar({"open": 99.0, "close": 100.0, "high": 100.0}, row, in_position=False)
+        assert len(strat._vol_window) == 24
+
+        spike_row = {"open": 101.0, "close": 95.0, "high": 101.0, "volume": 5000.0}
+        action = strat.on_closed_bar({"open": 100.0, "close": 101.0, "high": 101.0}, spike_row, in_position=False)
+        assert action == "enter", "red bar with a real volume spike should pass all gates and enter"
