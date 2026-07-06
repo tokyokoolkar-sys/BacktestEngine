@@ -65,8 +65,11 @@ class LiveParams:
     entry_volume_max_ratio: float
     # per first symbol in symbols list (used as template for screener)
     tp_pct: float
+    stop_pct: float
     body_pct: float
     direction: str
+    trail_activate_pct: float = 0.75
+    trail_buffer_pct: float = 0.45
 
 
 def _load_live_params(path: str) -> LiveParams:
@@ -87,8 +90,11 @@ def _load_live_params(path: str) -> LiveParams:
         fee_maker=float(g.get("fee_maker", 0.0002)),
         entry_volume_max_ratio=float(g.get("entry_volume_max_ratio", 2.5)),
         tp_pct=float(s0.get("tp_pct", 1.06)),
+        stop_pct=float(s0.get("stop_pct", 9999)),
         body_pct=float(s0.get("body_pct", 0.0)),
         direction=str(s0.get("direction", "long")),
+        trail_activate_pct=float(g.get("trail_activate_pct", 0.75)),
+        trail_buffer_pct=float(g.get("trail_buffer_pct", 0.45)),
     )
 
 
@@ -124,10 +130,14 @@ def _run_symbol(symbol: str, months: list[str], p: LiveParams, fetch: bool = Fal
         logger.warning("%s  skip — insufficient data (%s bars)", symbol, len(klines) if klines is not None else 0)
         return None
 
+    use_fixed_stop = p.stop_pct < 9000
     strat = StrategyConfig(
         entry_mode="red_dip",
         green_gate="off",
-        stop_mode="none",          # no fixed stop — mirrors live trail-only config
+        stop_mode="fixed" if use_fixed_stop else "trail",
+        stop_pct=p.stop_pct if use_fixed_stop else None,
+        trail_activate_pct=p.trail_activate_pct,
+        trail_buffer_pct=p.trail_buffer_pct,
         checkpoint_mode="first_green",
         position_model="dca",
         direction=p.direction,
@@ -328,108 +338,106 @@ def _worst_case_basket(p: LiveParams) -> float:
 
 
 def _optimize(symbols: list[str], months: list[str], p_base: LiveParams,
-              fetch: bool, max_basket_usdt: float) -> None:
-    """Grid-search body_pct × tp_pct × drop_step_pct × max_dca_orders × size_multiplier
-    per symbol. Print best combo per symbol + combined yaml block."""
+              fetch: bool, max_basket_usdt: float, workers: int = 20) -> None:
+    """Grid-search body_pct × tp_pct × drop_step_pct × max_dca_orders × size_multiplier × stop_pct
+    per symbol, parallelised across combos. Print best combo per symbol + combined yaml block."""
+    import itertools
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     BODY_PCTS      = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
     TP_PCTS        = [1.02, 1.03, 1.04, 1.05, 1.06, 1.07, 1.08]
     DROP_STEPS     = [0.5, 0.6, 0.68, 0.8, 1.0]
     MAX_DCA_ORDERS = [2, 3, 4, 5]
     SIZE_MULTS     = [1.0, 1.1, 1.2, 1.5]
+    STOP_PCTS      = [1.5, 2.0, 3.0, 5.0, 9999]  # 9999 = no stop
 
-    total_combos = len(BODY_PCTS) * len(TP_PCTS) * len(DROP_STEPS) * len(MAX_DCA_ORDERS) * len(SIZE_MULTS)
-    logger.info("Optimize: %d combos × %d symbols = %d backtests",
+    all_combos = list(itertools.product(BODY_PCTS, TP_PCTS, DROP_STEPS, MAX_DCA_ORDERS, SIZE_MULTS, STOP_PCTS))
+    total_combos = len(all_combos)
+    logger.info("Optimize: %d combos x %d symbols = %d backtests",
                 total_combos, len(symbols), total_combos * len(symbols))
     logger.info("Capital constraint: max_basket <= $%.2f", max_basket_usdt)
 
-    best_per_symbol: dict[str, dict] = {}
+    def _run_combo(symbol: str, combo: tuple) -> dict | None:
+        body, tp, drop, ndca, smult, stop = combo
+        p = dataclasses.replace(
+            p_base,
+            body_pct=body,
+            tp_pct=tp,
+            drop_step_pct=drop,
+            max_dca_orders=ndca,
+            size_multiplier=smult,
+            stop_pct=stop,
+            trail_activate_pct=p_base.trail_activate_pct,
+            trail_buffer_pct=p_base.trail_buffer_pct,
+        )
+        if _worst_case_basket(p) > max_basket_usdt:
+            return None
+        row = _run_symbol(symbol, months, p, fetch=fetch)
+        if row is None:
+            return None
+        row["body_pct"]       = body
+        row["tp_pct"]         = tp
+        row["drop_step_pct"]  = drop
+        row["max_dca_orders"] = ndca
+        row["size_multiplier"]= smult
+        row["stop_pct"]       = stop
+        row["basket_worst"]   = round(_worst_case_basket(p), 2)
+        return row
+
+    results_per_symbol: dict[str, list[dict]] = {}
 
     for sym_i, symbol in enumerate(symbols, 1):
-        logger.info("[%d/%d] optimizing %s ...", sym_i, len(symbols), symbol)
-        best = None
-        for body in BODY_PCTS:
-            for tp in TP_PCTS:
-                for drop in DROP_STEPS:
-                    for ndca in MAX_DCA_ORDERS:
-                        for smult in SIZE_MULTS:
-                            p = dataclasses.replace(
-                                p_base,
-                                body_pct=body,
-                                tp_pct=tp,
-                                drop_step_pct=drop,
-                                max_dca_orders=ndca,
-                                size_multiplier=smult,
-                            )
-                            # capital constraint — skip if basket too large
-                            if _worst_case_basket(p) > max_basket_usdt:
-                                continue
-                            row = _run_symbol(symbol, months, p, fetch=fetch)
-                            if row is None:
-                                continue
-                            row["body_pct"]       = body
-                            row["tp_pct"]         = tp
-                            row["drop_step_pct"]  = drop
-                            row["max_dca_orders"] = ndca
-                            row["size_multiplier"]= smult
-                            row["basket_worst"]   = round(_worst_case_basket(p), 2)
-                            if best is None or row["score"] > best["score"]:
-                                best = row
-        if best:
-            best_per_symbol[symbol] = best
+        logger.info("[%d/%d] optimizing %s (%d combos, %d workers) ...",
+                    sym_i, len(symbols), symbol, total_combos, workers)
+        profitable: list[dict] = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(_run_combo, symbol, c): c for c in all_combos}
+            for fut in as_completed(futs):
+                row = fut.result()
+                if row is None or row["exp_per_trade"] <= 0:
+                    continue
+                profitable.append(row)
+        profitable.sort(key=lambda r: r["weekly_roi_pct"], reverse=True)
+        results_per_symbol[symbol] = profitable[:20]
 
-    if not best_per_symbol:
+    if not results_per_symbol:
         print("\n(No results — all combos exceeded capital constraint or no data.)\n")
         return
 
-    # Print results
-    hdr = (f"{'SYMBOL':<16} {'SCORE':>8} {'EXP':>8} {'WK_ROI%':>8} {'N':>5} {'WIN%':>6}"
-           f" {'RR':>5} {'body':>5} {'tp':>5} {'drop':>5} {'ndca':>5} {'smult':>6} {'basket$':>8}")
-    print(f"\nOPTIMIZE  capital_cap=${ max_basket_usdt:.2f}  symbols={len(symbols)}\n")
-    print(hdr)
-    print("-" * len(hdr))
-    total_pnl = 0.0
-    for symbol in symbols:
-        r = best_per_symbol.get(symbol)
-        if not r:
-            print(f"{symbol:<16}  (no result)")
-            continue
-        total_pnl += r["total_pnl"]
-        print(f"{symbol:<16}"
-              f" {r['score']:>8.4f}"
-              f" {r['exp_per_trade']:>8.4f}"
-              f" {r['weekly_roi_pct']:>8.3f}"
-              f" {r['n_trades']:>5}"
-              f" {r['win_rate']*100:>5.1f}%"
-              f" {r['rr']:>5.2f}"
-              f" {r['body_pct']:>5.1f}"
-              f" {r['tp_pct']:>5.2f}"
-              f" {r['drop_step_pct']:>5.2f}"
-              f" {r['max_dca_orders']:>5}"
-              f" {r['size_multiplier']:>6.1f}"
-              f" {r['basket_worst']:>8.2f}")
-    print("-" * len(hdr))
-    print(f"{'TOTAL PnL/mo':<16}  {'':>8} {'':>8} {'':>8} {'':>5} {'':>6} {'':>5}"
-          f" {'':>5} {'':>5} {'':>5} {'':>5} {'':>6}  ${total_pnl:.4f}")
+    hdr = (f"{'#':>3} {'EXP':>8} {'WK_ROI%':>8} {'PNL/mo':>8} {'N':>5} {'WIN%':>6}"
+           f" {'RR':>5} {'body':>5} {'tp':>5} {'drop':>5} {'ndca':>4} {'smult':>5} {'stop%':>6} {'basket$':>8}")
+    sep = "-" * len(hdr)
 
-    # YAML block — per-symbol optimized params
-    print(f"\n--- YAML block (optimized per-symbol) ---\n")
-    print("symbols:")
     for symbol in symbols:
-        r = best_per_symbol.get(symbol)
-        if not r:
+        rows = results_per_symbol.get(symbol, [])
+        print(f"\n{'='*60}")
+        print(f"  {symbol}  --  {len(rows)} profitable combos (sorted by exp/trade)")
+        print(f"{'='*60}")
+        if not rows:
+            print("  (no profitable combo found)")
             continue
-        print(f"  - name: {symbol}")
-        print(f"    direction: {p_base.direction}")
-        print(f"    tp_pct: {r['tp_pct']}")
-        print(f"    stop_pct: 9999")
-        print(f"    max_dca_orders: {r['max_dca_orders']}")
-        print(f"    body_pct: {r['body_pct']}")
-        print(f"    active: true")
+        print(hdr)
+        print(sep)
+        for i, r in enumerate(rows, 1):
+            stop_disp = r.get('stop_pct', 9999)
+            print(f"{i:>3}"
+                  f" {r['exp_per_trade']:>8.4f}"
+                  f" {r['weekly_roi_pct']:>8.3f}"
+                  f" {r['total_pnl']:>8.2f}"
+                  f" {r['n_trades']:>5}"
+                  f" {r['win_rate']*100:>5.1f}%"
+                  f" {r['rr']:>5.2f}"
+                  f" {r['body_pct']:>5.1f}"
+                  f" {r['tp_pct']:>5.2f}"
+                  f" {r['drop_step_pct']:>5.2f}"
+                  f" {r['max_dca_orders']:>4}"
+                  f" {r['size_multiplier']:>5.1f}"
+                  f" {stop_disp:>6}"
+                  f" {r['basket_worst']:>8.2f}")
 
     # Global params most common across symbols (drop_step, size_mult)
-    drops = [best_per_symbol[s]["drop_step_pct"] for s in symbols if s in best_per_symbol]
-    smults = [best_per_symbol[s]["size_multiplier"] for s in symbols if s in best_per_symbol]
+    drops = [results_per_symbol[s][0]["drop_step_pct"] for s in symbols if results_per_symbol.get(s)]
+    smults = [results_per_symbol[s][0]["size_multiplier"] for s in symbols if results_per_symbol.get(s)]
     from collections import Counter
     best_drop = Counter(drops).most_common(1)[0][0]
     best_smult = Counter(smults).most_common(1)[0][0]
