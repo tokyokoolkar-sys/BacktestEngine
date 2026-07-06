@@ -36,6 +36,8 @@ class CheckpointStrategy:
     _POS    = "IN_POSITION"
     _LOCKED = "FLAT_LOCKED"
 
+    _VOL_WINDOW = 24  # bars, matches engine.py's entry_volume_filter rolling MA
+
     def __init__(self, cfg: StrategyConfig) -> None:
         self.cfg = cfg
         self._state: str = self._ARMED
@@ -44,6 +46,10 @@ class CheckpointStrategy:
         self._prior_high: float = 0.0    # high of bar at entry (for above_high gate)
         # green_confirm bookkeeping
         self._saw_red: bool = False      # red bar observed while FLAT_ARMED
+        # Running market-state trackers for ema_filter / require_volume_spike.
+        # Market state, not position state — survives reset()/flip_direction().
+        self._ema: float | None = None
+        self._vol_window: list[float] = []
 
     # ------------------------------------------------------------------
     # Public interface
@@ -90,6 +96,8 @@ class CheckpointStrategy:
         No-lookahead guarantee: only `row` (the closed candle) and `prev_row`
         (the previous closed candle) are used. Fills execute at the NEXT bar open.
         """
+        self._update_running_state(row)
+
         is_green = row["close"] > row["open"]   # close == open -> red (see module docstring)
         # For short: flip the signal so the same state machine enters on green and exits on red
         if self.cfg.direction == "short":
@@ -134,14 +142,60 @@ class CheckpointStrategy:
                 # Green without prior red -> stay armed
                 return "none"
 
-    def _try_enter(self, prev_row, row) -> str:
-        """Gate entry on body_pct; transition to IN_POSITION if it passes."""
+    def _update_running_state(self, row) -> None:
+        """Update EMA / rolling-volume trackers. Called once per bar, before any gate."""
         cfg = self.cfg
+        close = float(row["close"])
+        if cfg.ema_filter:
+            if self._ema is None:
+                self._ema = close
+            else:
+                k = 2.0 / (cfg.ema_period + 1)
+                self._ema = close * k + self._ema * (1 - k)
+        if cfg.require_volume_spike:
+            self._vol_window.append(float(row.get("volume", 0.0)))
+            if len(self._vol_window) > self._VOL_WINDOW:
+                self._vol_window.pop(0)
+
+    def _try_enter(self, prev_row, row) -> str:
+        """Gate entry on body_pct / ema_filter / red_candle_avoid_pct / require_volume_spike."""
+        cfg = self.cfg
+        long_side = cfg.direction != "short"
         if cfg.body_pct > 0.0:
             o = float(row["open"]); c = float(row["close"])
             body = abs(o - c) / o * 100.0 if o > 0 else 0.0
             if body < cfg.body_pct:
                 # Body too small -> stay armed, no entry
+                self._saw_red = False
+                return "none"
+        if cfg.ema_filter:
+            # Fail-closed during warmup: no confirmed trend yet, don't enter blind.
+            if self._ema is None:
+                self._saw_red = False
+                return "none"
+            close = float(row["close"])
+            trend_ok = close > self._ema if long_side else close < self._ema
+            if not trend_ok:
+                self._saw_red = False
+                return "none"
+        if cfg.red_candle_avoid_pct > 0.0 and prev_row is not None:
+            po = prev_row.get("open")
+            pc = prev_row.get("close")
+            if po is not None and pc is not None and po > 0:
+                po = float(po); pc = float(pc)
+                adverse_move = (po - pc) / po * 100.0 if long_side else (pc - po) / po * 100.0
+                if adverse_move >= cfg.red_candle_avoid_pct:
+                    self._saw_red = False
+                    return "none"
+        if cfg.require_volume_spike:
+            # Fail-closed during warmup: can't confirm a spike without a full window.
+            if len(self._vol_window) < self._VOL_WINDOW:
+                self._saw_red = False
+                return "none"
+            avg_vol = sum(self._vol_window) / len(self._vol_window)
+            cur_vol = self._vol_window[-1]
+            ratio = cur_vol / avg_vol if avg_vol > 0 else 0.0
+            if ratio < cfg.volume_spike_min_ratio:
                 self._saw_red = False
                 return "none"
         self._state = self._POS

@@ -1,0 +1,63 @@
+# weakly_longrun_bot_config — long-only, EMA(20)+volume-spike+red-candle-avoid filters
+# All filters run on 1h bars (no 15m pipeline). See CLAUDE.md for architecture notes.
+symbols:
+  - name: BTCUSDT
+    tp_pct: 1.0
+    stop_pct: 4.0
+    drop_step_pct: 0.75
+    active: true
+    direction: long
+
+  - name: ETHUSDT
+    tp_pct: 1.0
+    stop_pct: 4.0
+    drop_step_pct: 0.75
+    active: true
+    direction: long
+
+  - name: SOLUSDT
+    tp_pct: 1.2
+    stop_pct: 4.5
+    drop_step_pct: 0.65
+    active: true
+    direction: long
+
+  - name: XRPUSDT
+    tp_pct: 1.2
+    stop_pct: 4.5
+    drop_step_pct: 0.65
+    active: true
+    direction: long
+
+  - name: DOGEUSDT
+    tp_pct: 1.6
+    stop_pct: 5.5
+    drop_step_pct: 0.55
+    active: true
+    direction: long
+
+  - name: 1000PEPEUSDT
+    tp_pct: 1.6
+    stop_pct: 5.5
+    drop_step_pct: 0.55
+    active: true
+    direction: long
+
+global:
+  ntfy_topic: "kool-bot-7x4q9"
+  leverage: 9
+  base_margin: 9.0
+  dca_margin: 9.0
+  max_dca_orders: 4
+  max_concurrent_baskets: 2
+  daily_loss_limit: 3.5
+  trail_activate_pct: 0.75
+  ema_filter: true
+  ema_period: 20
+  red_candle_avoid_pct: 3.0
+  require_volume_spike: true
+  volume_spike_min_ratio: 2.5
+
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}

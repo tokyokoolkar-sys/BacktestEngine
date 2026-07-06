@@ -1,0 +1,93 @@
+# high_roi_bot_config — long-only DCA scalp, volume-spike-only entry, 10-symbol universe
+# No EMA / red-candle gate (per spec). All filters run on 1h bars.
+# stop_pct tiers corrected: original ask (8.0/8.5/10.0) exceeded the 7.5% liq distance
+# at 8x leverage (100*(1/8-0.05)) — stop would never fire, liq fires first. Shrunk to
+# 5.0/5.5/6.5 to stay safely under 7.5% with buffer for slippage/fees.
+symbols:
+  - name: BTCUSDT
+    tp_pct: 1.0
+    stop_pct: 5.0
+    drop_step_pct: 0.8
+    active: true
+    direction: long
+
+  - name: ETHUSDT
+    tp_pct: 1.0
+    stop_pct: 5.0
+    drop_step_pct: 0.8
+    active: true
+    direction: long
+
+  - name: SOLUSDT
+    tp_pct: 1.25
+    stop_pct: 5.5
+    drop_step_pct: 0.7
+    active: true
+    direction: long
+
+  - name: XRPUSDT
+    tp_pct: 1.25
+    stop_pct: 5.5
+    drop_step_pct: 0.7
+    active: true
+    direction: long
+
+  - name: AVAXUSDT
+    tp_pct: 1.25
+    stop_pct: 5.5
+    drop_step_pct: 0.7
+    active: true
+    direction: long
+
+  - name: SUIUSDT
+    tp_pct: 1.25
+    stop_pct: 5.5
+    drop_step_pct: 0.7
+    active: true
+    direction: long
+
+  - name: DOGEUSDT
+    tp_pct: 1.6
+    stop_pct: 6.5
+    drop_step_pct: 0.55
+    active: true
+    direction: long
+
+  - name: 1000PEPEUSDT
+    tp_pct: 1.6
+    stop_pct: 6.5
+    drop_step_pct: 0.55
+    active: true
+    direction: long
+
+  - name: TONUSDT
+    tp_pct: 1.6
+    stop_pct: 6.5
+    drop_step_pct: 0.55
+    active: true
+    direction: long
+
+  - name: NEARUSDT
+    tp_pct: 1.6
+    stop_pct: 6.5
+    drop_step_pct: 0.55
+    active: true
+    direction: long
+
+global:
+  ntfy_topic: "kool-bot-7x4q9"
+  leverage: 8
+  base_margin: 9.0
+  dca_margin: 9.0
+  max_dca_orders: 4
+  max_concurrent_baskets: 2
+  daily_loss_limit: 3.5
+  trail_activate_pct: 0.75
+  ema_filter: false
+  red_candle_avoid_pct: 0.0
+  require_volume_spike: true
+  volume_spike_min_ratio: 2.0
+
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}
