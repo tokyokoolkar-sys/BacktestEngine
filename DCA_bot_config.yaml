@@ -19,15 +19,16 @@ symbols:
   active: true
 
 global:
+  ntfy_topic: "kool-bot-7x4q9"
   leverage: 10
-  base_margin: 2.5            # $/basket first order
-  dca_margin: 2.5            # per safety order
+  base_margin: 9.0            # $/basket first order
+  dca_margin: 9.0            # per safety order
   max_dca_orders: 4          # global default (symbol override same)
   drop_step_pct: 0.65        # tighter step → lower avg entry on small moves
   step_multiplier: 1.0       # linear spacing
   size_multiplier: 1.1       # each safety = 1.1x prev
   first_order_ratio: 0.96    # first safety = 0.96x base
-  max_concurrent_baskets: 2  # 2×~$11.7=$23.4 < $32
+  max_concurrent_baskets: 1  # 2×~$11.7=$23.4 < $32
   daily_loss_limit: 5.0      # tighten to 3.0 if want safety
   fee_taker: 0.0005          # 0.05% market orders
   fee_maker: 0.0002
