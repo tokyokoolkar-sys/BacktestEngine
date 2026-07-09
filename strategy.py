@@ -50,6 +50,7 @@ class CheckpointStrategy:
         # Market state, not position state — survives reset()/flip_direction().
         self._ema: float | None = None
         self._vol_window: list[float] = []
+        self._color_window: list[bool] = []   # recent RAW candle colors (True=green) for greencount_filter
 
     # ------------------------------------------------------------------
     # Public interface
@@ -156,6 +157,12 @@ class CheckpointStrategy:
             self._vol_window.append(float(row.get("volume", 0.0)))
             if len(self._vol_window) > self._VOL_WINDOW:
                 self._vol_window.pop(0)
+        if cfg.greencount_filter:
+            # RAW candle color (direction-independent): green = close > open. The majority
+            # over the window is a market fact; the side check happens in _try_enter.
+            self._color_window.append(float(row["close"]) > float(row["open"]))
+            if len(self._color_window) > cfg.greencount_period:
+                self._color_window.pop(0)
 
     def _try_enter(self, prev_row, row) -> str:
         """Gate entry on body_pct / ema_filter / red_candle_avoid_pct / require_volume_spike."""
@@ -175,6 +182,18 @@ class CheckpointStrategy:
                 return "none"
             close = float(row["close"])
             trend_ok = close > self._ema if long_side else close < self._ema
+            if not trend_ok:
+                self._saw_red = False
+                return "none"
+        if cfg.greencount_filter:
+            # Fail-closed during warmup: need a full window of closed candles first.
+            if len(self._color_window) < cfg.greencount_period:
+                self._saw_red = False
+                return "none"
+            greens = sum(self._color_window)
+            reds = len(self._color_window) - greens
+            # long enters only when greens dominate, short only when reds dominate; tie skips.
+            trend_ok = greens > reds if long_side else reds > greens
             if not trend_ok:
                 self._saw_red = False
                 return "none"
