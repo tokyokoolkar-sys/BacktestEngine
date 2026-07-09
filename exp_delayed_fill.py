@@ -206,13 +206,13 @@ def simulate_basket(entry_px, entry_ns, direction, o, h, l, c, kns, ft, fr, dcfg
 
         if liq_hit and not protects:
             fill = liq * (1.0 + slip) if short else liq * (1.0 - slip)
-            return _close(fill, kns[j], cap=True), n_saf, "liquidation"
+            return _close(fill, kns[j], cap=True), n_saf, "liquidation", j
         if stop_hit:
             fill = stop * (1.0 + slip) if short else stop * (1.0 - slip)
-            return _close(fill, kns[j], cap=False), n_saf, "stop"
+            return _close(fill, kns[j], cap=False), n_saf, "stop", j
         if (bl <= tp if short else bh >= tp):
             fill = tp * (1.0 + slip) if short else tp * (1.0 - slip)
-            return _close(fill, kns[j], cap=False), n_saf, "take_profit"
+            return _close(fill, kns[j], cap=False), n_saf, "take_profit", j
 
         # c. first-green checkpoint -> fill at NEXT 1h open
         is_green = c[j] > o[j]
@@ -220,15 +220,15 @@ def simulate_basket(entry_px, entry_ns, direction, o, h, l, c, kns, ft, fr, dcfg
             is_green = not is_green
         if is_green:
             if j + 1 < nbars:
-                raw, ex_ns = o[j + 1], kns[j + 1]
+                raw, ex_ns, ex_j = o[j + 1], kns[j + 1], j + 1
             else:
-                raw, ex_ns = c[j], kns[j]
+                raw, ex_ns, ex_j = c[j], kns[j], j
             fill = raw * (1.0 + slip) if short else raw * (1.0 - slip)
-            return _close(fill, ex_ns, cap=False), n_saf, "checkpoint"
+            return _close(fill, ex_ns, cap=False), n_saf, "checkpoint", ex_j
 
     # end of data
     fill = c[nbars - 1] * (1.0 + slip) if short else c[nbars - 1] * (1.0 - slip)
-    return _close(fill, kns[nbars - 1], cap=False), n_saf, "end"
+    return _close(fill, kns[nbars - 1], cap=False), n_saf, "end", nbars - 1
 
 
 # --------------------------------------------------------------------------- #
@@ -244,8 +244,8 @@ def self_check(k1h, f):
     worst = 0.0
     res = run_backtest(k1h, f, cfg("long"))
     for tr in res.trades:
-        my, _, _ = simulate_basket(tr.entry_price, tr.entry_time.value, "long",
-                                   o, h, l, c, kns, ft, fr, dcfg, ecfg, scfg)
+        my, _, _, _ = simulate_basket(tr.entry_price, tr.entry_time.value, "long",
+                                      o, h, l, c, kns, ft, fr, dcfg, ecfg, scfg)
         worst = max(worst, abs(my - tr.net_pnl))
     return worst, len(res.trades)
 
@@ -328,8 +328,8 @@ def main():
                 entry_px = fill_px[i] * (1.0 + slip) if want_v == 1 else fill_px[i] * (1.0 - slip)
                 if int(np.searchsorted(kns, entry_ns, side="left")) >= nbar:
                     continue
-                pnl_d, _, _ = simulate_basket(entry_px, entry_ns, direction,
-                                              o, h, l, c, kns, ft, fr, dcfg, ecfg, scfg)
+                pnl_d, _, _, _ = simulate_basket(entry_px, entry_ns, direction,
+                                                 o, h, l, c, kns, ft, fr, dcfg, ecfg, scfg)
                 dl += pnl_d; nd += 1
 
         Btot += blind; Itot += imm; Dtot += dl
