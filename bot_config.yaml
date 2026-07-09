@@ -144,6 +144,13 @@ global:
   size_multiplier: 1.0
   first_order_ratio: 0.96
   max_concurrent_baskets: 2  # flat sizing: 2x15.00 = $30 < $32.41 capital
+  # greencount lookback entry gate (backtested honest edge: blind -81 -> +268 OOS/H2, 7/7
+  # symbols positive; portfolio K=1 +836, K=2 +961). long enters only when greens>reds over
+  # the last greencount_period closed 1h candles, short only when reds>greens. Set true to
+  # arm it live. Requires BOTH a long-config and a short-config entry per symbol to harvest
+  # both directions; the gate makes them non-overlapping.
+  greencount_filter: false
+  greencount_period: 10
   daily_loss_limit: 5.0
   fee_taker: 0.0005
   fee_maker: 0.0002
