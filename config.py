@@ -100,6 +100,17 @@ class StrategyConfig:
 
     ema_period: int = 20
 
+    greencount_filter: bool = False
+    # False — no green-count lookback gate.
+    # True  — at the entry bar, read the last `greencount_period` CLOSED candles and take
+    #         the majority color as the trend: long enters only if greens > reds, short
+    #         only if reds > greens (ties skip). No lookahead — only closed candles up to
+    #         and including the current bar. Fail-closed during warmup (fewer than
+    #         greencount_period candles seen). Backtested honest edge: N=10, stop=2%,
+    #         Blind -81 -> +290 OOS/H2, 7/7 symbols positive (see exp_lookback_gate.py).
+
+    greencount_period: int = 10
+
     red_candle_avoid_pct: float = 0.0
     # 0 = off. Otherwise skip entry if the previous closed bar moved against the
     # trade direction by >= this %: long checks (prev_open-prev_close)/prev_open*100,

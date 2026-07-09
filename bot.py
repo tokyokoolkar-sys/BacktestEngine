@@ -137,6 +137,8 @@ class GlobalConfig:
     red_candle_avoid_pct: float = 0.0      # 0 = off; skip entry if prev closed bar moved against direction by >= this %
     require_volume_spike: bool = False     # require current-bar volume >= volume_spike_min_ratio × rolling 24-bar avg
     volume_spike_min_ratio: float = 2.5
+    greencount_filter: bool = False        # long enters only if greens>reds over last N closed candles, short if reds>greens
+    greencount_period: int = 10            # N candles for the greencount lookback gate
 
 
 @dataclass
@@ -398,6 +400,8 @@ class DcaBot:
                 red_candle_avoid_pct=self.g.red_candle_avoid_pct,
                 require_volume_spike=self.g.require_volume_spike,
                 volume_spike_min_ratio=self.g.volume_spike_min_ratio,
+                greencount_filter=self.g.greencount_filter,
+                greencount_period=self.g.greencount_period,
             ))
             self.last_trade[sc.name] = None
 
