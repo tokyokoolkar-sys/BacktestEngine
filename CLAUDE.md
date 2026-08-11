@@ -33,6 +33,7 @@ python bot.py --config bot_config.yaml             # loop forever (default)
 python bot.py --config bot_config.yaml --status    # print active positions
 python trade.py                                    # manual-oracle variant
 python dashboard.py --port 5000                    # control-plane UI at localhost:5000
+python mcp_server.py                                # MCP tool surface (stdio) for the control plane
 
 # Tests (pytest; no config file — run by name)
 pytest                              # all
@@ -66,6 +67,7 @@ Data flows: `data.py` (download/cache) → `engine.py` (sim) → `metrics.py` (s
   - all `POST /api/control/*` routes require the `TRADE_CONTROL_TOKEN` env var (else 503)
   - process liveness via PID checks (`_pid_alive`, cross-platform — Windows uses `OpenProcess`, duplicated in `bot.py`/`trade.py` on purpose to avoid a circular import)
 - **`perps.py`** — `fetch_usdt_perps()` supplies the symbol-picker universe. Layered fallback so it never returns `[]`: fresh in-memory cache → live API (several `fapi*.binance.com` host mirrors) → persistent on-disk cache (`perps_cache.json`, gitignored) → bundled static list. Refreshes both caches on a successful fetch. Matters because direct `fapi.binance.com` is ISP-blocked in the dev environment.
+- **`mcp_server.py`** — MCP tool surface (stdio) over the same control plane `dashboard.py` exposes over HTTP: start/stop the auto or manual engine, `manual_enter(symbol)`, and read-only status/trade-history tools. Holds no Binance credentials itself and has no raw order-placement tool — it drives `bot.py`/`trade.py` via the same subprocess+PID-file+control-JSON mechanism `dashboard.py` uses, so sizing/DCA ladder/stop/TP stay governed by `bot_config.yaml` either way.
 
 ## Config & secrets flow
 

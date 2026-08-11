@@ -6,3 +6,4 @@ python-binance
 pyyaml
 python-dotenv
 flask
+mcp>=1.0.0
