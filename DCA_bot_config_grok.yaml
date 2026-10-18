@@ -30,6 +30,7 @@ symbols:
   active: true
 
 global:
+  ntfy_topic: "kool-bot-7x4q9"
   leverage: 20
   base_margin: 2.0
   dca_margin: 2.0
