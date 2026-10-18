@@ -1,0 +1,163 @@
+# OOS-validated body-filter symbols
+# body_pct gates entry: long=red candle body%, short=green candle body%
+symbols:
+
+# === ACTIVE: long ===
+- name: FILUSDT         # long  body>=1.0%  tp=1.5%  exp=+0.00649  296 trades  68m history
+  tp_pct: 1.5
+  stop_pct: 3.0
+  active: true
+  direction: long
+  body_pct: 1.0
+
+- name: BCHUSDT         # long  body>=1.0%  tp=0.8%  exp=+0.00720  149 trades  68m history
+  tp_pct: 0.8
+  stop_pct: 3.0
+  active: true
+  direction: long
+  body_pct: 1.0
+
+- name: ARPAUSDT        # long  body>=1.5%  tp=1.5%  exp=+0.00730  141 trades  56m history
+  tp_pct: 1.5
+  stop_pct: 3.0
+  active: true
+  direction: long
+  body_pct: 1.5
+
+- name: ALLOUSDT        # long  body>=2.0%  tp=2.0%  exp=+0.01378  47 trades   7m history (short — watch)
+  tp_pct: 2.0
+  stop_pct: 3.0
+  active: true
+  direction: long
+  body_pct: 2.0
+
+# === ACTIVE: short ===
+- name: XRPUSDT         # short body>=1.5%  tp=0.8%  exp=+0.00548  98 trades   68m history
+  tp_pct: 0.8
+  stop_pct: 3.0
+  active: true
+  direction: short
+  body_pct: 1.5
+
+- name: ZECUSDT         # short body>=2.0%  tp=0.8%  exp=+0.00880  150 trades  76m history
+  tp_pct: 0.8
+  stop_pct: 3.0
+  active: true
+  direction: short
+  body_pct: 2.0
+
+- name: ARPAUSDT        # short body>=2.0%  tp=1.5%  exp=+0.00610  95 trades   56m history — disabled: same symbol as long above (bot dedupes by name)
+  tp_pct: 1.5
+  stop_pct: 3.0
+  active: false
+  direction: short
+  body_pct: 2.0
+
+- name: LABUSDT         # short body>=2.0%  tp=2.0%  exp=+0.00736  496 trades  8m history — DISABLED: ~$10.75/unit, stepSize=1, base order too small at $2.5 margin
+  tp_pct: 2.0
+  stop_pct: 3.0
+  active: false
+  direction: short
+  body_pct: 2.0
+
+- name: SYNUSDT         # short body>=2.0%  tp=2.0%  exp=+0.01199  58 trades   22m history
+  tp_pct: 2.0
+  stop_pct: 3.0
+  active: true
+  direction: short
+  body_pct: 2.0
+
+# === DISABLED: dropped from active (failed OOS or user choice) ===
+- name: ETCUSDT         # long  body>=0.8%  tp=0.8%  exp=+0.00421  257 trades — dropped per user
+  tp_pct: 0.8
+  stop_pct: 3.0
+  active: false
+  direction: long
+  body_pct: 0.8
+
+- name: DOTUSDT         # long  body>=1.0%  tp=0.8%  exp=+0.00371  164 trades — dropped per user
+  tp_pct: 0.8
+  stop_pct: 3.0
+  active: false
+  direction: long
+  body_pct: 1.0
+
+- name: NEARUSDT        # long  body=1.5  tp=1.5  exp=+0.04548  36 trades — too few
+  tp_pct: 1.5
+  stop_pct: 3.0
+  active: false
+  direction: long
+  body_pct: 1.5
+
+- name: SOLUSDT         # long  body=1.5  tp=2.0  exp=+0.01590  47 trades — too few
+  tp_pct: 2.0
+  stop_pct: 3.0
+  active: false
+  direction: long
+  body_pct: 1.5
+
+- name: APTUSDT         # long  body=1.5  tp=1.5  exp=+0.01358  32 trades — too few
+  tp_pct: 1.5
+  stop_pct: 3.0
+  active: false
+  direction: long
+  body_pct: 1.5
+
+- name: BNBUSDT
+  tp_pct: 0.5
+  stop_pct: 3.0
+  active: false
+
+- name: BTCUSDT
+  tp_pct: 0.5
+  stop_pct: 3.0
+  active: false
+
+- name: INJUSDT
+  tp_pct: 0.5
+  stop_pct: 3.0
+  active: false
+
+- name: TIAUSDT
+  tp_pct: 0.8
+  stop_pct: 3.0
+  active: false
+
+- name: OPUSDT
+  tp_pct: 0.5
+  stop_pct: 3.0
+  active: false
+
+- name: ARBUSDT
+  tp_pct: 0.5
+  stop_pct: 3.0
+  active: false
+
+global:
+  ntfy_topic: "kool-bot-7x4q9"
+  leverage: 10
+  base_margin: 2.5
+  dca_margin: 2.5
+  max_dca_orders: 5
+  drop_step_pct: 0.8
+  step_multiplier: 1.0
+  size_multiplier: 1.0
+  first_order_ratio: 0.96
+  max_concurrent_baskets: 2  # flat sizing: 2x15.00 = $30 < $32.41 capital
+  # greencount lookback entry gate (backtested honest edge: blind -81 -> +268 OOS/H2, 7/7
+  # symbols positive; portfolio K=1 +836, K=2 +961). long enters only when greens>reds over
+  # the last greencount_period closed 1h candles, short only when reds>greens. Set true to
+  # arm it live. Requires BOTH a long-config and a short-config entry per symbol to harvest
+  # both directions; the gate makes them non-overlapping.
+  greencount_filter: false
+  greencount_period: 10
+  daily_loss_limit: 5.0
+  fee_taker: 0.0005
+  fee_maker: 0.0002
+  poll_interval_sec: 60
+  trail_activate_pct: 1.0
+  trail_buffer_pct: 0.3
+  risk_per_trade_pct: 0.0
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}

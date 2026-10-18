@@ -1,0 +1,40 @@
+# DCA long-run config — LABUSDT long, conservative: 1 basket, 9x lev, trail stop ON.
+# Lower risk than DCA_bot_config.yaml: single concurrent basket, trailing stop caps gains
+# on reversals, tighter daily loss. Built for sustained running, not aggressive scalp.
+# stop_pct: 9999 = no fixed mark stop; trail stop is the exit mechanism instead.
+# Trade live: python bot.py --config DCA_Longrun_bot_config.yaml
+# Dry run:  python bot.py --config DCA_Longrun_bot_config.yaml --dry-run
+
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}
+
+symbols:
+- name: LABUSDT
+  direction: long
+  tp_pct: 1.06
+  stop_pct: 9999
+  max_dca_orders: 4
+  body_pct: 2.0
+  active: true
+
+global:
+  leverage: 9
+  base_margin: 2.5            # $/basket first order
+  dca_margin: 2.5            # per safety order
+  max_dca_orders: 4          # global default (symbol override same)
+  drop_step_pct: 0.68        # slightly wider than scalp (0.65) — fewer fills, better avg
+  step_multiplier: 1.0       # linear spacing
+  size_multiplier: 1.1       # each safety = 1.1x prev
+  first_order_ratio: 0.96    # first safety = 0.96x base
+  max_concurrent_baskets: 1  # conservative — 1 basket ~$11.7 << $32
+  daily_loss_limit: 3.5      # tight — kill day on -$3.5
+  fee_taker: 0.0005          # 0.05% market orders
+  fee_maker: 0.0002
+  poll_interval_sec: 60
+  risk_per_trade_pct: 0.0    # fixed base_margin, not % balance
+  trail_activate_pct: 0.75   # activate trail when price >= avg_entry × 1.0075
+  trail_buffer_pct: 0.45     # trail stop = highest × (1 - 0.0045)
+  entry_volume_filter: true    # skip entry on volume spikes (falling-knife)
+  entry_volume_max_ratio: 2.0  # 2x 24h avg vol = blowoff, don't catch
+  dual_mode: false            # per-symbol direction honored; off

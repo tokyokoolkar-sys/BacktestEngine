@@ -1,0 +1,95 @@
+# DCA_universe_longrun_bot_config.yaml
+# 9-symbol optimized universe — 33,600 backtests, per-symbol best combo within $17/basket cap.
+# Dropped OPGUSDT (negative exp after optimization).
+# TACUSDT/JELLYJELLYUSDT flagged low sample (<25 trades) — watch live.
+# Theoretical: ~$74/mo. Realistic: ~$45-55/mo at max_concurrent_baskets=2.
+# Trade live: python bot.py --config DCA_universe_longrun_bot_config.yaml
+# Dry run:    python bot.py --config DCA_universe_longrun_bot_config.yaml --dry-run
+
+api:
+  key: ${BINANCE_API_KEY}
+  secret: ${BINANCE_API_SECRET}
+
+symbols:
+  - name: CAPUSDT        # N=136  exp=0.065  RR=1.78  basket=$14.50
+    direction: long
+    tp_pct: 1.05
+    stop_pct: 9999
+    max_dca_orders: 5
+    body_pct: 1.0
+    active: true
+  - name: OUSDT          # N=78   exp=0.072  RR=4.17  basket=$15.38
+    direction: long
+    tp_pct: 1.06
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 1.5
+    active: true
+  - name: MYXUSDT        # N=168  exp=0.057  RR=0.67  basket=$8.50
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 2
+    body_pct: 1.5
+    active: true
+  - name: PORTALUSDT     # N=593  exp=0.045  RR=0.81  basket=$13.90
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 3
+    body_pct: 1.0
+    active: true
+  - name: AIAUSDT        # N=192  exp=0.050  RR=1.08  basket=$14.50
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 5
+    body_pct: 1.0
+    active: true
+  - name: CTRUSDT        # N=37   exp=0.096  RR=1.54  basket=$7.78
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 2
+    body_pct: 2.0
+    active: true
+  - name: GWEIUSDT       # N=121  exp=0.056  RR=1.70  basket=$13.64
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 4
+    body_pct: 1.5
+    active: true
+  - name: TACUSDT        # N=24   exp=0.153  RR=999   basket=$7.30  WARN: low sample
+    direction: long
+    tp_pct: 1.07
+    stop_pct: 9999
+    max_dca_orders: 2
+    body_pct: 2.5
+    active: true
+  - name: JELLYJELLYUSDT # N=11   exp=0.167  RR=999   basket=$11.24 WARN: low sample
+    direction: long
+    tp_pct: 1.08
+    stop_pct: 9999
+    max_dca_orders: 3
+    body_pct: 3.0
+    active: true
+
+global:
+  leverage: 10
+  base_margin: 2.5            # $/basket first order
+  dca_margin: 2.5             # per safety order
+  max_dca_orders: 4           # per-symbol overrides take precedence
+  drop_step_pct: 0.5          # optimizer consensus across symbols
+  step_multiplier: 1.0
+  size_multiplier: 1.0        # optimizer consensus across symbols
+  first_order_ratio: 0.96
+  max_concurrent_baskets: 2   # 2 × $15.38 worst = $30.76 fits $35
+  daily_loss_limit: 3.5
+  fee_taker: 0.0005
+  fee_maker: 0.0002
+  poll_interval_sec: 30
+  risk_per_trade_pct: 0.0
+  trail_activate_pct: 0.75
+  trail_buffer_pct: 0.45
+  ntfy_topic: kool-bot-7x4q9

@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "camofox-browser": {
+      "source": "redf0x1/camofox-browser",
+      "sourceType": "github",
+      "skillPath": "skills/camofox-browser/SKILL.md",
+      "computedHash": "9091b94c7bb334c13868cf4692e83f166985ca5b674b16bb8ff88b01e7d8e31c"
+    },
+    "camofox-cli": {
+      "source": "redf0x1/camofox-browser",
+      "sourceType": "github",
+      "skillPath": "skills/camofox-cli/SKILL.md",
+      "computedHash": "9f871025d245c4252e474d3b78698b39706aac4186ee44098c690a0e4755e781"
+    },
+    "dogfood": {
+      "source": "redf0x1/camofox-browser",
+      "sourceType": "github",
+      "skillPath": "skills/dogfood/SKILL.md",
+      "computedHash": "aed30ccdd82e6d76b4fba399ce1e817b977c58dbab2e23a3e5ded612667ee8c3"
+    },
+    "gemini-image": {
+      "source": "redf0x1/camofox-browser",
+      "sourceType": "github",
+      "skillPath": "skills/gemini-image/SKILL.md",
+      "computedHash": "9f9bdee0b276f64a797b4a9b0215d109ea40edc34d8d8dfd45744fb979451007"
+    },
+    "reddit": {
+      "source": "redf0x1/camofox-browser",
+      "sourceType": "github",
+      "skillPath": "skills/reddit/SKILL.md",
+      "computedHash": "dc5f28265a11f885df9120ad9e1ba8d9d8ac8c38c9118876daaea4157f2352d6"
+    }
+  }
+}
