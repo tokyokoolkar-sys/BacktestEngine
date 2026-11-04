@@ -37,6 +37,8 @@ from config import BacktestConfig, DCAConfig, ExecConfig, StrategyConfig
 from data import (
     download_funding,
     download_klines,
+    funding_cache_path,
+    klines_cache_path,
     load_funding,
     load_klines,
     months_list,
@@ -99,8 +101,10 @@ def _three_variants(symbol: str, direction: str = "long") -> list[tuple[str, Bac
 
 def _ensure_cache(symbol: str, months: list[str], fetch: bool) -> tuple[str, str]:
     """Return (klines_path, funding_path); download if missing and fetch=True."""
-    klines_path = CACHE_DIR / "klines.parquet"
-    funding_path = CACHE_DIR / "funding.parquet"
+    # Same names data.download_* write. These were "klines.parquet" / "funding.parquet",
+    # which nothing writes, so a fresh `--fetch` run downloaded fine and then crashed.
+    klines_path = klines_cache_path(symbol, CACHE_DIR)
+    funding_path = funding_cache_path(symbol, CACHE_DIR)
 
     missing = not klines_path.exists() or not funding_path.exists()
 
