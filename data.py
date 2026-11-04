@@ -30,6 +30,16 @@ BASE = "https://data.binance.vision/data/futures/um/monthly"
 ROOT = Path(__file__).parent
 
 
+def klines_cache_path(symbol: str, out_dir: str | Path = ROOT / "cache", interval: str = "1m") -> Path:
+    """Where download_klines writes its parquet. Readers must use this too."""
+    return Path(out_dir) / f"{symbol}-{interval}-klines.parquet"
+
+
+def funding_cache_path(symbol: str, out_dir: str | Path = ROOT / "cache") -> Path:
+    """Where download_funding writes its parquet. Readers must use this too."""
+    return Path(out_dir) / f"{symbol}-funding.parquet"
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -108,7 +118,7 @@ def download_klines(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{symbol}-{interval}-klines.parquet"
+    path = klines_cache_path(symbol, out_dir, interval)
 
     if path.exists():
         logger.info("klines cache hit: %s", path)
@@ -202,7 +212,7 @@ def download_funding(
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{symbol}-funding.parquet"
+    path = funding_cache_path(symbol, out_dir)
 
     if path.exists():
         logger.info("funding cache hit: %s", path)
